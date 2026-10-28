@@ -1,5 +1,7 @@
 # StageJack
 
+<p align="center"><img src="assets/StageJack-icon-1024.png" alt="StageJack app icon" width="180"></p>
+
 **A universal sound-stage processor for any Windows audio output.**
 Route your system or game audio through StageJack and get a 10-band EQ, adjustable stage width / depth / height, a controllable Universe-style reverb with built-in instrument separation, and a master limiter, on any headset or speakers.
 
@@ -102,6 +104,7 @@ This compiles `src/*.cs` with the built-in C# compiler into `dist\StageJack.exe`
 ```
 src/            C# sources (audio engine + DSP, UI, visual EQ)
 assets/fonts/   Rajdhani (SIL OFL)
+assets/         app icon (.ico, .svg, .png)
 docs/           architecture notes
 Build-StageJack.cmd, Launch-StageJack.cmd
 ```

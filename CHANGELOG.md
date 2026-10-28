@@ -4,6 +4,7 @@
 - **Reverb spaces:** new Space dropdown in Reverb / Separation with six named presets (Campus, Rhythm, Classroom, Dorm, Union, Innovation). A preset sets Reverb amount, size, tone, width and pre-delay (0-5 ms). Clarity and Smoothness are left alone. Editing any of those five sliders returns to Custom. The choice is saved in `settings.ini`.
 - **Shorter minimum tail:** Reverb size now maps to 0.3 s - 7.2 s (was 0.6 s - 7.2 s) so small rooms are possible. Existing size settings sound slightly shorter than before.
 - Preset values live in the `ReverbSpace` table at the top of `src/StageJackApp.cs`.
+- **App icon:** a jack plugged into a stage with EQ bars. Source files in `assets/` (`StageJack.ico`, `.svg`, 1024 px `.png`); the build embeds the .ico in the exe and the window uses it too.
 - Note: written without a Windows compiler. Please report build errors.
 
 ## 0.4.0

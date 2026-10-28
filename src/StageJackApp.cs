@@ -52,6 +52,7 @@ sealed class MainWindow : Form {
     public MainWindow() {
         Text = "StageJack"; StartPosition = FormStartPosition.CenterScreen; ClientSize = new Size(620, 900); MinimumSize = new Size(560, 740);
         BackColor = bg; ForeColor = white; FormBorderStyle = FormBorderStyle.Sizable; Font = new Font("Segoe UI", 9);
+        try { Icon = Icon.ExtractAssociatedIcon(Application.ExecutablePath); } catch { }
         string dir = AppDomain.CurrentDomain.BaseDirectory; savePath = Path.Combine(dir, "settings.ini");
         try {
             fonts.AddFontFile(Path.Combine(dir, "Rajdhani-Regular.ttf")); fonts.AddFontFile(Path.Combine(dir, "Rajdhani-SemiBold.ttf"));
