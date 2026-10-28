@@ -24,6 +24,8 @@ sealed class MainWindow : Form {
     readonly PrivateFontCollection fonts = new PrivateFontCollection();
     Font regular, strong, display, small;
     ComboBox inBox, outBox; Button startBtn, bypassBtn;
+    EqView eqView; CheckBox advChk; Panel eqSection, bandPanel, vp; Timer viewTimer;
+    readonly SpectrumAnalyzer analyzer = new SpectrumAnalyzer(128, AudioEngine.Rate); readonly float[] fftBuf = new float[SpectrumAnalyzer.Size];
     bool ready, wantRun, waiting; int tries, autoFails; DateTime lastStart = DateTime.MinValue; string wantIn, wantOut;
 
     public MainWindow() {
@@ -42,10 +44,12 @@ sealed class MainWindow : Form {
         status = new Label { Text = "●  STOPPED", ForeColor = muted, Font = small, AutoSize = true, Location = new Point(25, 55) }; header.Controls.Add(status);
         Button reset = MakeButton("RESET", 90, 34); reset.Location = new Point(500, 28); reset.Anchor = AnchorStyles.Top | AnchorStyles.Right; reset.Click += delegate { ResetAll(); }; header.Controls.Add(reset);
         Panel viewport = new Panel { Dock = DockStyle.Fill, AutoScroll = true, BackColor = bg };
+        vp = viewport;
         Controls.Add(header); Controls.Add(viewport); header.BringToFront();
 
         saveTimer = new Timer { Interval = 500 }; saveTimer.Tick += delegate { saveTimer.Stop(); Save(); };
         pollTimer = new Timer { Interval = 500 }; pollTimer.Tick += delegate { Poll(); }; pollTimer.Start();
+        viewTimer = new Timer { Interval = 33 }; viewTimer.Tick += delegate { UpdateSpectrum(); }; viewTimer.Start();
         pingTimer = new Timer { Interval = 3000 }; pingTimer.Tick += delegate { Ping(); };
 
         Panel route = Section(viewport, "ROUTING", 250);
@@ -72,9 +76,21 @@ sealed class MainWindow : Form {
         AddSlider(rev, "Reverb width", 357, 0, 100, 100, "CENTER", "WIDE", "");
         AddSlider(rev, "Smoothness", 436, 0, 100, 60, "TIGHT", "SMOOTH", "");
 
-        Panel eq = Section(viewport, "EQUALIZER  /  10-BAND", 680);
-        for (int i = 0; i < bands.Length; i++) AddSlider(eq, bands[i], 40 + i * 62, -12, 12, 0, "", "", " dB");
-        viewport.AutoScrollMinSize = new Size(0, eq.Bottom + 16);
+        eqSection = Section(viewport, "EQUALIZER", 500);
+        advChk = new CheckBox { Text = "ADVANCED  /  10-BAND", ForeColor = accent, BackColor = card, Font = strong, AutoSize = true, FlatStyle = FlatStyle.Flat, TabStop = false, Cursor = Cursors.Hand, Location = new Point(318, 8) };
+        eqSection.Controls.Add(advChk);
+        eqView = new EqView { Location = new Point(18, 44), Size = new Size(494, 190), Font = small };
+        eqView.NodeDrag += delegate(string name, int v) { StageSlider sl; if (sliders.TryGetValue(name, out sl)) sl.Value = v; };
+        eqSection.Controls.Add(eqView);
+        AddSlider(eqSection, "Low", 252, -12, 12, 0, "BASS  /  below 150 Hz", "", " dB");
+        AddSlider(eqSection, "Mid", 331, -12, 12, 0, "VOICE  /  around 1 kHz", "", " dB");
+        AddSlider(eqSection, "High", 410, -12, 12, 0, "TREBLE  /  above 5 kHz", "", " dB");
+        bandPanel = new Panel { Location = new Point(0, 500), Size = new Size(530, 660), BackColor = card, Visible = false };
+        bandPanel.Controls.Add(new Label { Text = "10-BAND  /  fine control", ForeColor = accent, Font = strong, AutoSize = true, Location = new Point(15, 4) });
+        for (int i = 0; i < bands.Length; i++) AddSlider(bandPanel, bands[i], 36 + i * 62, -12, 12, 0, "", "", " dB");
+        eqSection.Controls.Add(bandPanel);
+        advChk.CheckedChanged += delegate { ApplyAdvanced(); if (ready) { PushParams(); saveTimer.Stop(); saveTimer.Start(); } };
+        ApplyAdvanced();
 
         Shown += delegate { ActiveControl = null; viewport.AutoScrollPosition = Point.Empty; };
 
@@ -88,7 +104,7 @@ sealed class MainWindow : Form {
         PushParams();
         if (Missing()) BeginWait(); else if (wantRun) Start();
 
-        FormClosing += delegate { pingTimer.Stop(); engine.Stop(); Save(); };
+        FormClosing += delegate { viewTimer.Stop(); pingTimer.Stop(); engine.Stop(); Save(); };
     }
 
     Button MakeButton(string text, int w, int h) {
@@ -118,11 +134,38 @@ sealed class MainWindow : Form {
     void PushParams() {
         float[] eq = new float[bands.Length];
         for (int i = 0; i < eq.Length; i++) eq[i] = sliders[bands[i]].Value;
-        engine.Dsp.Set(sliders["Reverb"].Value, sliders["Stage width"].Value, sliders["Stage depth"].Value, sliders["Stage height"].Value, sliders["Output level"].Value, sliders["Reverb size"].Value, sliders["Reverb tone"].Value, sliders["Reverb pre-delay"].Value, sliders["Reverb clarity"].Value, sliders["Reverb width"].Value, sliders["Smoothness"].Value, eq);
+        engine.Dsp.Set(sliders["Reverb"].Value, sliders["Stage width"].Value, sliders["Stage depth"].Value, sliders["Stage height"].Value, sliders["Output level"].Value, sliders["Reverb size"].Value, sliders["Reverb tone"].Value, sliders["Reverb pre-delay"].Value, sliders["Reverb clarity"].Value, sliders["Reverb width"].Value, sliders["Smoothness"].Value, sliders["Low"].Value, sliders["Mid"].Value, sliders["High"].Value, advChk.Checked, eq);
+        RefreshEq();
+    }
+    void ApplyAdvanced() {
+        bool on = advChk.Checked; bandPanel.Visible = on; eqSection.Height = on ? 1160 : 500;
+        vp.AutoScrollMinSize = new Size(0, eqSection.Bottom + 16);
+    }
+    // redraw the EQ curve and nodes from the current slider values
+    void RefreshEq() {
+        if (eqView == null) return;
+        float[] bv = new float[bands.Length];
+        for (int i = 0; i < bv.Length; i++) bv[i] = sliders[bands[i]].Value;
+        bool adv = advChk.Checked;
+        eqView.SetCurve(EqModel.Curve(160, AudioEngine.Rate, sliders["Low"].Value, sliders["Mid"].Value, sliders["High"].Value, sliders["Stage height"].Value, adv, bv));
+        int n = adv ? 3 + bands.Length : 3;
+        string[] names = new string[n]; float[] hz = new float[n], db = new float[n]; bool[] major = new bool[n];
+        names[0] = "Low"; hz[0] = EqModel.LowHz; names[1] = "Mid"; hz[1] = EqModel.MidHz; names[2] = "High"; hz[2] = EqModel.HighHz;
+        for (int i = 0; i < 3; i++) { db[i] = sliders[names[i]].Value; major[i] = true; }
+        if (adv) for (int i = 0; i < bands.Length; i++) { names[3 + i] = bands[i]; hz[3 + i] = Dsp.Freqs[i]; db[3 + i] = bv[i]; }
+        eqView.SetNodes(names, hz, db, major);
+    }
+    void UpdateSpectrum() {
+        if (eqView == null || !eqView.Visible || WindowState == FormWindowState.Minimized) return;
+        bool live = engine.Running;
+        if (live) engine.Dsp.CopyRecent(fftBuf);
+        analyzer.Analyze(fftBuf, !live);
+        eqView.SetSpectrum(analyzer.Level);
     }
     void ResetAll() {
         sliders["Reverb"].Value = 20; sliders["Stage width"].Value = 50; sliders["Stage depth"].Value = 0; sliders["Stage height"].Value = 50; sliders["Output level"].Value = 0;
         sliders["Reverb size"].Value = 75; sliders["Reverb tone"].Value = 60; sliders["Reverb pre-delay"].Value = 30; sliders["Reverb clarity"].Value = 50; sliders["Reverb width"].Value = 100; sliders["Smoothness"].Value = 60;
+        sliders["Low"].Value = 0; sliders["Mid"].Value = 0; sliders["High"].Value = 0;
         foreach (string b in bands) sliders[b].Value = 0;
     }
 
@@ -209,6 +252,7 @@ sealed class MainWindow : Form {
                 int e = line.IndexOf('='); if (e <= 0) continue;
                 string k = line.Substring(0, e), v = line.Substring(e + 1);
                 if (k == "Input") inName = v; else if (k == "Output") outName = v; else if (k == "Running") wantRun = v == "1";
+                else if (k == "Advanced") advChk.Checked = v == "1";
                 else if (sliders.ContainsKey(k)) { int n; if (int.TryParse(v, out n)) sliders[k].Value = n; }
             }
         } catch { }
@@ -219,6 +263,7 @@ sealed class MainWindow : Form {
             foreach (KeyValuePair<string, StageSlider> kv in sliders) lines.Add(kv.Key + "=" + kv.Value.Value);
             if ((wantIn ?? SelName(inBox)) != null) lines.Add("Input=" + (wantIn ?? SelName(inBox)));
             if ((wantOut ?? SelName(outBox)) != null) lines.Add("Output=" + (wantOut ?? SelName(outBox)));
+            lines.Add("Advanced=" + (advChk.Checked ? "1" : "0"));
             lines.Add("Running=" + (engine.Running || wantRun || waiting ? "1" : "0"));
             File.WriteAllLines(savePath, lines.ToArray());
         } catch { }

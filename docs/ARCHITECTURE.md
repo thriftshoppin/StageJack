@@ -6,6 +6,7 @@
 | `src/StageJackApp.cs` | WinForms UI, device list, settings (`settings.ini`), auto-reconnect |
 | `src/StageJackAudio.cs` | winmm (MME) capture/playback engine and all DSP |
 | `src/StageSlider.cs` | Custom slider control and theme colors |
+| `src/EqView.cs` | Spectrum analyzer (FFT) and the visual EQ control (curve, nodes, drag editing) |
 
 Constraints: C# 5 compatible (builds with the compiler built into Windows), no third-party libraries.
 
@@ -15,7 +16,7 @@ Constraints: C# 5 compatible (builds with the compiler built into Windows), no t
 Format: 48 kHz, 16-bit, stereo, 480-frame (10 ms) buffers, 4 input / 6 output buffers, 3 output buffers primed.
 
 ## DSP order (per sample, in `Dsp.Process`)
-1. 10-band EQ (peaking biquads, 31 Hz - 16 kHz)
+1. Tone EQ: Low shelf (150 Hz), Mid bell (1 kHz, Q 0.7), High shelf (5 kHz); then the 10-band EQ (peaking biquads, 31 Hz - 16 kHz) when Advanced is on
 2. Stage height (peak filter at 7.5 kHz, +/-6 dB)
 3. Stage width (mid/side)
 4. Envelope follower on the dry signal (drives clarity ducking)
@@ -28,8 +29,14 @@ Format: 48 kHz, 16-bit, stereo, 480-frame (10 ms) buffers, 4 input / 6 output bu
 
 Parameter changes are smoothed per sample (about 20 ms) so moving a slider never clicks.
 
+## Visual EQ
+- `Dsp` keeps a 4096-sample mono ring of the final output (post-limiter; the raw input while bypassed). The UI copies the latest 2048 samples every ~33 ms.
+- `SpectrumAnalyzer` applies a Hann window, a radix-2 FFT, a +3 dB/octave tilt (so pink noise looks flat), then maps bins to 128 log-spaced columns (20 Hz - 20 kHz) with fast attack / slow release smoothing. Display range is `FloorDb` -90 to `CeilDb` -28.
+- `EqModel.Curve` builds the same biquads the DSP uses and sums their magnitude responses (including Stage height), so the drawn curve matches the audio.
+- Node dragging only changes the matching slider; the sliders remain the single source of truth for settings.
+
 ## Tuning constants
-In `StageJackAudio.cs`: `UniLowCutHz`, `FdnLen`, `FdnModDepth`, `FdnModHz`, `DifLen` (reverb character); limiter ceiling and release in `Limiter`.
+In `StageJackAudio.cs`: `EqModel` (`LowHz`, `MidHz`, `MidQ`, `HighHz`); `UniLowCutHz`, `FdnLen`, `FdnModDepth`, `FdnModHz`, `DifLen` (reverb character); limiter ceiling and release in `Limiter`.
 
 ## Known limits
 - MME latency is roughly 60-90 ms. Not suitable for live monitoring of a microphone or instrument.

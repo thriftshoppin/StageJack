@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.3.0
+- **Visual equalizer:** live output spectrum (2048-point FFT of the processed signal) with the EQ curve drawn over it and draggable nodes. Double-click a node to reset it.
+- **Easy / Advanced modes:** new Low (shelf, 150 Hz), Mid (bell, 1 kHz) and High (shelf, 5 kHz) controls. The **Advanced** checkbox reveals the 10-band EQ; 10-band values are only applied while it is ticked.
+- Auto headroom now accounts for the Low / Mid / High boosts.
+- New `src/EqView.cs`; `Build-StageJack.cmd` updated to compile it. The Advanced setting is saved in `settings.ini`.
+- Note: written without a Windows compiler. Please report build errors.
+
 ## 0.2.0
 - **Reverb:** replaced Freeverb with a Universe-style feedback delay network (8 modulated lines, Hadamard mixing, input diffusion, damping, low-cut on the tail).
 - **New REVERB / SEPARATION controls:** Reverb size, tone, pre-delay, clarity (ducks the tail while sounds play), width, and Smoothness.

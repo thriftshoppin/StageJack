@@ -18,7 +18,8 @@ StageJack is a small standalone Windows app (C# / WinForms). It has no driver, n
 | Settings | saved next to the app in `settings.ini` |
 
 ## What it does
-- **10-band equalizer** (31 Hz to 16 kHz, +/-12 dB)
+- **Visual equalizer:** a live spectrum of what you are actually hearing, with the EQ curve drawn over it. Drag the nodes on the graph or use the sliders
+- **Easy and Advanced modes:** Low / Mid / High tone controls by default; tick **Advanced** to add a full 10-band EQ (31 Hz to 16 kHz, +/-12 dB)
 - **Stage width / depth / height** for shaping the stereo image
 - **Reverb with separation controls:** size, tone, pre-delay, width, and *clarity*, which lowers the tail while sounds play so instruments stay distinct
 - **Smoothness:** softens how fast the reverb ducks and recovers, so it never pumps or chops
@@ -64,11 +65,20 @@ Never choose *CABLE Input* as StageJack's output: it would feed back into itself
 | | Reverb clarity | How much the tail ducks while sound is playing |
 | | Reverb width | Center to full-width tail |
 | | Smoothness | How gently the ducking moves (tight to smooth) |
-| Equalizer | 10 bands | +/-12 dB each |
+| Equalizer | Low | Bass shelf below 150 Hz, +/-12 dB |
+| | Mid | Broad bell around 1 kHz, +/-12 dB |
+| | High | Treble shelf above 5 kHz, +/-12 dB |
+| | Advanced (checkbox) | Reveals the 10-band EQ, +/-12 dB per band (31 Hz to 16 kHz) |
 
 ### Suggested starting points
 - **Virtual-surround / games:** Reverb 20, Size 60, Tone 40, Pre-delay 35, Clarity 70, Width 60, Stage width 50, Stage depth 0.
 - **Music, big space:** Reverb 35, Size 85, Tone 50, Pre-delay 30, Clarity 40, Width 100, Smoothness 70.
+
+### Using the visual equalizer
+- The filled graph is the live spectrum of StageJack's output (after EQ, reverb and limiter). In Bypass it shows the unprocessed signal.
+- The white line is the combined EQ curve (it also includes Stage height). The three large dots are Low, Mid and High; drag them up or down, or double-click one to reset it.
+- **Easy mode** (default): only Low, Mid and High are applied.
+- **Advanced mode:** the 10 band dots appear on the graph and the 10-band sliders appear below. Low / Mid / High stay active, so you can use both. Switching Advanced off keeps your 10-band values but stops applying them.
 
 ## Troubleshooting
 | Symptom | Try |
@@ -89,7 +99,7 @@ This compiles `src/*.cs` with the built-in C# compiler into `dist\StageJack.exe`
 
 ## Repository layout
 ```
-src/            C# sources
+src/            C# sources (audio engine + DSP, UI, visual EQ)
 assets/fonts/   Rajdhani (SIL OFL)
 docs/           architecture notes
 Build-StageJack.cmd, Launch-StageJack.cmd
@@ -97,7 +107,7 @@ Build-StageJack.cmd, Launch-StageJack.cmd
 See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the signal chain and tuning constants, and [CHANGELOG.md](CHANGELOG.md) for versions.
 
 ## Status
-Version 0.2.0. The 0.2.0 audio changes were written without a Windows compiler to hand, so please report build errors or audio problems as issues.
+Version 0.3.0. The 0.2.0 and 0.3.0 changes were written without a Windows compiler to hand, so please report build errors, display problems or audio problems as issues.
 
 ## Credits and notices
 - UI font: Rajdhani, licensed under the SIL Open Font License (`assets/fonts/Rajdhani-OFL.txt`).
