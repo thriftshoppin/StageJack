@@ -2,6 +2,8 @@ using System;
 using System.Collections.Generic;
 using System.Runtime.InteropServices;
 using System.Threading;
+using NAudio.CoreAudioApi;
+using NAudio.Wave;
 
 // ---------- Device list (same shape the UI already uses) ----------
 // Id is the index into the list returned by Inputs()/Outputs(). EndpointId is the Windows device id used by WASAPI.
@@ -26,6 +28,7 @@ static class WasapiNative {
     public const int AUDCLNT_SHAREMODE_SHARED = 0;
     public const int AUDCLNT_STREAMFLAGS_EVENTCALLBACK = 0x00040000;
     public const int AUDCLNT_STREAMFLAGS_NOPERSIST = 0x00080000;
+    public const int AUDCLNT_STREAMFLAGS_LOOPBACK = 0x00020000;
     public const int AUDCLNT_BUFFERFLAGS_SILENT = 0x2;
     public const int STGM_READ = 0;
     public static readonly Guid IID_IAudioClient = new Guid("1CB9AD4C-DBFA-4c32-B178-C2F568A703B2");
@@ -288,7 +291,7 @@ public sealed class Dsp {
     static readonly float[] SgnL = { 1, -1, 1, -1, 1, -1, 1, -1 }, SgnR = { 1, 1, -1, -1, 1, 1, -1, -1 };
     readonly Biquad bLo = new Biquad(), bMi = new Biquad(), bHi = new Biquad(); bool loOn, miOn, hiOn;
     float pLow, pMid, pHigh; bool pAdv;
-    readonly float[] tap = new float[4096]; volatile int tapW;
+    readonly float[] tapL = new float[4096], tapR = new float[4096]; volatile int tapW;
     readonly Limiter lim;
     float hpA, hpL, hpR;
     float pSize = 75, pTone = 60, pPre = 30, pClar = 50, pRWidth = 100, pSmooth = 60;
@@ -342,7 +345,14 @@ public sealed class Dsp {
     }
 
     // Copies the most recent output samples (mono) for the spectrum display
-    public void CopyRecent(float[] dst) { int n = dst.Length, w = tapW; for (int i = 0; i < n; i++) dst[i] = tap[(w - n + i) & 4095]; }
+    public void CopyRecent(float[] dst) {
+        int n = dst.Length, w = tapW;
+        for (int i = 0; i < n; i++) { int at = (w - n + i) & 4095; dst[i] = (tapL[at] + tapR[at]) * 0.5f; }
+    }
+    public void CopyRecent(float[] left, float[] right) {
+        int n = Math.Min(left.Length, right.Length), w = tapW;
+        for (int i = 0; i < n; i++) { int at = (w - n + i) & 4095; left[i] = tapL[at]; right[i] = tapR[at]; }
+    }
 
     static short ToS(float x) {
         float a = Math.Abs(x);
@@ -353,7 +363,7 @@ public sealed class Dsp {
     // buf = interleaved 16-bit stereo, processed in place
     public void Process(short[] b, int frames) {
         if (version != seen) { lock (sync) { Recompute(); seen = version; } }
-        if (Bypass) { for (int n = 0; n < frames; n++) { tap[tapW] = (b[2 * n] + b[2 * n + 1]) * (0.5f / 32768f); tapW = (tapW + 1) & 4095; } return; }
+        if (Bypass) { for (int n = 0; n < frames; n++) { tapL[tapW] = b[2 * n] / 32768f; tapR[tapW] = b[2 * n + 1] / 32768f; tapW = (tapW + 1) & 4095; } return; }
         const float inv = 1f / 32768f;
         float tPre = preSamp;
         for (int n = 0; n < frames; n++) {
@@ -387,7 +397,7 @@ public sealed class Dsp {
             if (wetWidth != 1f) { float wm = (wl + wr) * 0.5f, ws = (wl - wr) * 0.5f * wetWidth; wl = wm + ws; wr = wm - ws; }
             float outL = (l * dryGain + wl * wetGain) * levelLin, outR = (r * dryGain + wr * wetGain) * levelLin;
             lim.P(ref outL, ref outR);
-            tap[tapW] = (outL + outR) * 0.5f; tapW = (tapW + 1) & 4095;
+            tapL[tapW] = outL; tapR[tapW] = outR; tapW = (tapW + 1) & 4095;
             b[2 * n] = ToS(outL);
             b[2 * n + 1] = ToS(outR);
         }
@@ -403,6 +413,7 @@ public sealed class Dsp {
 // reconnects in-thread instead of dying on the first glitch.
 public sealed class AudioEngine {
     public const int Rate = 48000;
+    const int InputTapLength = 8192;
     // Requested buffer duration in 100-nanosecond units (10 ms). Shared mode rounds to the device period.
     const long HnsBuffer = 100000 * 10;
     // Common transient WASAPI failures on virtual endpoints
@@ -412,22 +423,191 @@ public sealed class AudioEngine {
     const int AUDCLNT_E_ENDPOINT_CREATE_FAILED = unchecked((int)0x8889000F);
 
     public readonly Dsp Dsp = new Dsp(Rate);
+    // A monitor tap written from decoded WASAPI capture packets before DSP changes them.
+    // The EQ visualizer reads this ring independently of the playback/render pipeline.
+    readonly float[] inputTapL = new float[InputTapLength];
+    readonly float[] inputTapR = new float[InputTapLength];
+    readonly float[] outputTapL = new float[InputTapLength];
+    readonly float[] outputTapR = new float[InputTapLength];
+    readonly object outputTapLock = new object();
+    volatile int inputTapWrite;
+    volatile int outputTapWrite;
+    volatile int outputTapLastTick;
+    volatile bool outputHasData;
+    int inputTapCount;
+    int outputTapCount;
+    WasapiLoopbackCapture systemLoopback;
+    MMDeviceEnumerator analysisEnumerator;
+    MMDevice systemLoopbackDevice;
+    string analysisEndpointId;
+    bool analysisConfigured;
     public volatile string Error;
+    public volatile string MonitorError;
     Thread th; volatile bool run;
     string inEndpoint, outEndpoint;
+    public AudioEngine() {
+        // Create NAudio's COM enumerator before the app's legacy WASAPI wrappers.
+        // Both interop layers target the same COM identity; keeping one NAudio
+        // enumerator avoids a Runtime Callable Wrapper type collision.
+        try { analysisEnumerator = new MMDeviceEnumerator(); }
+        catch (Exception e) { MonitorError = e.Message; }
+    }
     public bool Running { get { return th != null && th.IsAlive; } }
 
+    public void CopyRecentInput(float[] left, float[] right) {
+        CopyRecent(inputTapL, inputTapR, inputTapWrite, inputTapCount, left, right);
+    }
+
+    public void CopyRecentOutput(float[] left, float[] right) {
+        if (left == null || right == null || left.Length != right.Length) return;
+        lock (outputTapLock) {
+            int age = unchecked(Environment.TickCount - outputTapLastTick);
+            if (!outputHasData || age > 500) {
+                Array.Clear(left, 0, left.Length); Array.Clear(right, 0, right.Length);
+                outputTapCount = 0; outputHasData = false;
+                return;
+            }
+            CopyRecent(outputTapL, outputTapR, outputTapWrite, outputTapCount, left, right);
+        }
+    }
+
+    static void CopyRecent(float[] ringL, float[] ringR, int write, int available, float[] left, float[] right) {
+        if (left == null || right == null || left.Length != right.Length) return;
+        available = Math.Min(available, InputTapLength);
+        int count = Math.Min(left.Length, available);
+        int pad = left.Length - count;
+        for (int i = 0; i < pad; i++) { left[i] = 0f; right[i] = 0f; }
+        int start = (write - count + InputTapLength) & (InputTapLength - 1);
+        for (int i = 0; i < count; i++) {
+            int at = (start + i) & (InputTapLength - 1);
+            left[pad + i] = ringL[at];
+            right[pad + i] = ringR[at];
+        }
+    }
+
+    void TapInput(short[] stereo, int frames) {
+        int w = inputTapWrite;
+        for (int i = 0; i < frames; i++) {
+            inputTapL[w] = stereo[i * 2] / 32768f;
+            inputTapR[w] = stereo[i * 2 + 1] / 32768f;
+            w = (w + 1) & (InputTapLength - 1);
+        }
+        inputTapCount = Math.Min(InputTapLength, inputTapCount + frames);
+        inputTapWrite = w;
+    }
+
+    void TapSystemOutput(object sender, WaveInEventArgs e) {
+        WasapiLoopbackCapture capture = sender as WasapiLoopbackCapture;
+        if (capture == null || e.BytesRecorded <= 0) return;
+        WaveFormat format = capture.WaveFormat;
+        int block = format.BlockAlign;
+        int channels = Math.Max(1, format.Channels);
+        int sampleBytes = Math.Max(1, format.BitsPerSample / 8);
+        if (block <= 0 || e.BytesRecorded < block) return;
+        bool isFloat = format.Encoding == WaveFormatEncoding.IeeeFloat && format.BitsPerSample == 32;
+        int frames = e.BytesRecorded / block;
+        lock (outputTapLock) {
+            int w = outputTapWrite;
+            for (int i = 0; i < frames; i++) {
+                int frame = i * block;
+                float l = ReadLoopbackSample(e.Buffer, frame, format.BitsPerSample, isFloat);
+                float r = channels > 1 ? ReadLoopbackSample(e.Buffer, frame + sampleBytes, format.BitsPerSample, isFloat) : l;
+                outputTapL[w] = ClampSample(l); outputTapR[w] = ClampSample(r);
+                w = (w + 1) & (InputTapLength - 1);
+            }
+            outputTapCount = Math.Min(InputTapLength, outputTapCount + frames);
+            outputTapWrite = w;
+            outputTapLastTick = Environment.TickCount;
+            outputHasData = true;
+        }
+    }
+
+    static float ReadLoopbackSample(byte[] data, int offset, int bits, bool isFloat) {
+        if (isFloat) return BitConverter.ToSingle(data, offset);
+        if (bits == 8) return (data[offset] - 128) / 128f;
+        if (bits == 16) return BitConverter.ToInt16(data, offset) / 32768f;
+        if (bits == 24) {
+            int raw = data[offset] | (data[offset + 1] << 8) | (data[offset + 2] << 16);
+            if ((raw & 0x800000) != 0) raw |= unchecked((int)0xff000000);
+            return raw / 8388608f;
+        }
+        if (bits == 32) return BitConverter.ToInt32(data, offset) / 2147483648f;
+        return 0f;
+    }
+
+    static float ClampSample(float value) {
+        if (float.IsNaN(value) || float.IsInfinity(value)) return 0f;
+        return value > 1f ? 1f : (value < -1f ? -1f : value);
+    }
+
+    void StartSystemLoopback(string endpointId) {
+        StopSystemLoopback();
+        lock (outputTapLock) {
+            outputTapCount = 0; outputTapWrite = 0; outputHasData = false; outputTapLastTick = 0;
+            Array.Clear(outputTapL, 0, outputTapL.Length); Array.Clear(outputTapR, 0, outputTapR.Length);
+        }
+        MMDevice device = null;
+        WasapiLoopbackCapture capture = null;
+        try {
+            if (analysisEnumerator == null) analysisEnumerator = new MMDeviceEnumerator();
+            device = string.IsNullOrEmpty(endpointId)
+                ? analysisEnumerator.GetDefaultAudioEndpoint(DataFlow.Render, Role.Multimedia)
+                : analysisEnumerator.GetDevice(endpointId);
+            capture = new WasapiLoopbackCapture(device);
+            capture.DataAvailable += TapSystemOutput;
+            capture.RecordingStopped += delegate(object sender, StoppedEventArgs e) {
+                if (e.Exception != null) MonitorError = e.Exception.Message;
+            };
+            systemLoopbackDevice = device;
+            systemLoopback = capture;
+            analysisEndpointId = endpointId;
+            analysisConfigured = true;
+            capture.StartRecording();
+            MonitorError = null;
+        } catch (Exception e) {
+            MonitorError = e.Message;
+            try { if (capture != null) capture.Dispose(); } catch { }
+            try { if (device != null) device.Dispose(); } catch { }
+            systemLoopback = null; systemLoopbackDevice = null;
+            analysisEndpointId = endpointId;
+            analysisConfigured = true;
+        }
+    }
+
+    void StopSystemLoopback() {
+        WasapiLoopbackCapture capture = systemLoopback;
+        MMDevice device = systemLoopbackDevice;
+        systemLoopback = null;
+        systemLoopbackDevice = null;
+        if (capture != null) {
+            capture.DataAvailable -= TapSystemOutput;
+            try { capture.StopRecording(); } catch { }
+            try { capture.Dispose(); } catch { }
+        }
+        try { if (device != null) device.Dispose(); } catch { }
+    }
+
     public void Start(int inId, int outId) {
+        Start(inId, outId, null);
+    }
+    public void Start(int inId, int outId, string analysisEndpointId) {
         Stop();
         Error = null;
         inEndpoint = WasapiDevices.EndpointIdAt(true, inId);
         outEndpoint = WasapiDevices.EndpointIdAt(false, outId);
         if (string.IsNullOrEmpty(inEndpoint)) { Error = "Could not find that input device. Press Refresh and try again."; return; }
         if (string.IsNullOrEmpty(outEndpoint)) { Error = "Could not find that output device. Press Refresh and try again."; return; }
+        SetAnalysisEndpoint(analysisEndpointId);
         run = true;
         th = new Thread(Run); th.IsBackground = true; th.Priority = ThreadPriority.Highest; th.Name = "StageJack audio"; th.Start();
     }
+    public void SetAnalysisEndpoint(string endpointId) {
+        if (analysisConfigured && string.Equals(this.analysisEndpointId, endpointId, StringComparison.OrdinalIgnoreCase)
+            && systemLoopback != null) return;
+        StartSystemLoopback(endpointId);
+    }
     public void Stop() { run = false; if (th != null) { th.Join(3000); th = null; } }
+    public void Shutdown() { Stop(); StopSystemLoopback(); try { if (analysisEnumerator != null) analysisEnumerator.Dispose(); } catch { } analysisEnumerator = null; analysisConfigured = false; analysisEndpointId = null; }
 
     static int FloatBits(float f) { return BitConverter.ToInt32(BitConverter.GetBytes(f), 0); }
     static bool Transient(int hr) {
@@ -447,7 +627,7 @@ public sealed class AudioEngine {
     }
 
     // Opens one WASAPI client. Tries event-driven first; falls back to pull mode for drivers that hate EVENTCALLBACK.
-    static WasapiNative.IAudioClient OpenClient(string endpointId, bool capture, AutoResetEvent frameEvent, bool useEvent, out IntPtr mixFormat, out int bufferFrames, out int frameBytes, out int channels, out bool float32, out bool eventArmed) {
+    static WasapiNative.IAudioClient OpenClient(string endpointId, bool capture, AutoResetEvent frameEvent, bool useEvent, out IntPtr mixFormat, out int bufferFrames, out int frameBytes, out int channels, out int sampleBits, out int validBits, out bool float32, out bool eventArmed, bool loopback = false) {
         eventArmed = false;
         WasapiNative.IMMDeviceEnumerator en = WasapiNative.CreateEnumerator();
         WasapiNative.IMMDevice dev;
@@ -459,15 +639,26 @@ public sealed class AudioEngine {
         Hr(client.GetMixFormat(out mixFormat), "read the device format");
         WasapiNative.WAVEFORMATEX fmt = (WasapiNative.WAVEFORMATEX)Marshal.PtrToStructure(mixFormat, typeof(WasapiNative.WAVEFORMATEX));
         channels = fmt.nChannels < 1 ? 1 : fmt.nChannels;
-        int bits = fmt.wBitsPerSample;
-        float32 = (fmt.wFormatTag == 3) || (fmt.wFormatTag == 0xFFFE && bits == 32);
-        if (!float32 && bits == 0) bits = 16;
-        frameBytes = (bits / 8) * channels;
+        sampleBits = fmt.wBitsPerSample;
+        validBits = sampleBits;
+        ushort formatTag = fmt.wFormatTag;
+        if (formatTag == 0xFFFE && fmt.cbSize >= 22) {
+            validBits = unchecked((ushort)Marshal.ReadInt16(mixFormat, 18));
+            Guid subFormat = (Guid)Marshal.PtrToStructure(IntPtr.Add(mixFormat, 24), typeof(Guid));
+            if (subFormat == new Guid("00000003-0000-0010-8000-00aa00389b71")) formatTag = 3;
+            else if (subFormat == new Guid("00000001-0000-0010-8000-00aa00389b71")) formatTag = 1;
+            else formatTag = 0;
+        }
+        float32 = formatTag == 3 && sampleBits == 32;
+        if (sampleBits == 0) sampleBits = 16;
+        if (validBits <= 0 || validBits > sampleBits) validBits = sampleBits;
+        frameBytes = fmt.nBlockAlign > 0 ? fmt.nBlockAlign : (sampleBits / 8) * channels;
         if (frameBytes <= 0) frameBytes = 4 * channels;
 
         Guid session = Guid.Empty;
         int flags = WasapiNative.AUDCLNT_STREAMFLAGS_NOPERSIST;
         if (useEvent) flags |= WasapiNative.AUDCLNT_STREAMFLAGS_EVENTCALLBACK;
+        if (loopback) flags |= WasapiNative.AUDCLNT_STREAMFLAGS_LOOPBACK;
         int hr = client.Initialize(WasapiNative.AUDCLNT_SHAREMODE_SHARED, flags, HnsBuffer, 0, mixFormat, ref session);
         if (hr < 0 && useEvent) {
             // Driver rejected event mode – rebuild client in pull mode
@@ -477,10 +668,20 @@ public sealed class AudioEngine {
             Hr(client.GetMixFormat(out mixFormat), "read the device format");
             fmt = (WasapiNative.WAVEFORMATEX)Marshal.PtrToStructure(mixFormat, typeof(WasapiNative.WAVEFORMATEX));
             channels = fmt.nChannels < 1 ? 1 : fmt.nChannels;
-            bits = fmt.wBitsPerSample;
-            float32 = (fmt.wFormatTag == 3) || (fmt.wFormatTag == 0xFFFE && bits == 32);
-            if (!float32 && bits == 0) bits = 16;
-            frameBytes = (bits / 8) * channels;
+            sampleBits = fmt.wBitsPerSample;
+            validBits = sampleBits;
+            formatTag = fmt.wFormatTag;
+            if (formatTag == 0xFFFE && fmt.cbSize >= 22) {
+                validBits = unchecked((ushort)Marshal.ReadInt16(mixFormat, 18));
+                Guid subFormat = (Guid)Marshal.PtrToStructure(IntPtr.Add(mixFormat, 24), typeof(Guid));
+                if (subFormat == new Guid("00000003-0000-0010-8000-00aa00389b71")) formatTag = 3;
+                else if (subFormat == new Guid("00000001-0000-0010-8000-00aa00389b71")) formatTag = 1;
+                else formatTag = 0;
+            }
+            float32 = formatTag == 3 && sampleBits == 32;
+            if (sampleBits == 0) sampleBits = 16;
+            if (validBits <= 0 || validBits > sampleBits) validBits = sampleBits;
+            frameBytes = fmt.nBlockAlign > 0 ? fmt.nBlockAlign : (sampleBits / 8) * channels;
             if (frameBytes <= 0) frameBytes = 4 * channels;
             session = Guid.Empty;
             flags = WasapiNative.AUDCLNT_STREAMFLAGS_NOPERSIST;
@@ -514,10 +715,10 @@ public sealed class AudioEngine {
                 WasapiNative.IAudioRenderClient render = null;
                 IntPtr inFmt = IntPtr.Zero, outFmt = IntPtr.Zero;
                 try {
-                    int inBufFrames, outBufFrames, inFrameBytes, outFrameBytes, inCh, outCh;
+                    int inBufFrames, outBufFrames, inFrameBytes, outFrameBytes, inCh, outCh, inSampleBits, inValidBits, outSampleBits, outValidBits;
                     bool inFloat, outFloat, inEvent, outEvent;
-                    inClient = OpenClient(inEndpoint, true, inEv, true, out inFmt, out inBufFrames, out inFrameBytes, out inCh, out inFloat, out inEvent);
-                    outClient = OpenClient(outEndpoint, false, outEv, true, out outFmt, out outBufFrames, out outFrameBytes, out outCh, out outFloat, out outEvent);
+                    inClient = OpenClient(inEndpoint, true, inEv, true, out inFmt, out inBufFrames, out inFrameBytes, out inCh, out inSampleBits, out inValidBits, out inFloat, out inEvent);
+                    outClient = OpenClient(outEndpoint, false, outEv, true, out outFmt, out outBufFrames, out outFrameBytes, out outCh, out outSampleBits, out outValidBits, out outFloat, out outEvent);
 
                     object svc;
                     Guid iidCap = WasapiNative.IID_IAudioCaptureClient, iidRen = WasapiNative.IID_IAudioRenderClient;
@@ -590,11 +791,14 @@ public sealed class AudioEngine {
                                     dspBuf[i * 2 + 1] = (short)(R * 32767f);
                                 }
                             } else {
-                                int bytesPerSamp = inFrameBytes / inCh;
-                                if (bytesPerSamp == 2) {
+                                int bytesPerSamp = inSampleBits / 8;
+                                if (inSampleBits == 8 || inSampleBits == 16 || inSampleBits == 24 || inSampleBits == 32) {
                                     for (int i = 0; i < frames; i++) {
-                                        dspBuf[i * 2] = Marshal.ReadInt16(data, i * inFrameBytes);
-                                        dspBuf[i * 2 + 1] = inCh > 1 ? Marshal.ReadInt16(data, i * inFrameBytes + 2) : dspBuf[i * 2];
+                                        int frameOffset = i * inFrameBytes;
+                                        float l = ReadPcmSample(data, frameOffset, inSampleBits, inValidBits);
+                                        float r = inCh > 1 ? ReadPcmSample(data, frameOffset + bytesPerSamp, inSampleBits, inValidBits) : l;
+                                        dspBuf[i * 2] = ToShort(l);
+                                        dspBuf[i * 2 + 1] = ToShort(r);
                                     }
                                 } else {
                                     for (int i = 0; i < frames * 2; i++) dspBuf[i] = 0;
@@ -602,6 +806,7 @@ public sealed class AudioEngine {
                             }
                             capture.ReleaseBuffer(frames);
 
+                            TapInput(dspBuf, frames);
                             Dsp.Process(dspBuf, frames);
 
                             int outPad;
@@ -673,5 +878,24 @@ public sealed class AudioEngine {
             inEv.Close();
             outEv.Close();
         }
+    }
+
+    static float ReadPcmSample(IntPtr data, int offset, int containerBits, int validBits) {
+        long value;
+        if (containerBits == 8) return (Marshal.ReadByte(data, offset) - 128) / 128f;
+        if (containerBits == 16) value = Marshal.ReadInt16(data, offset);
+        else if (containerBits == 24) {
+            int raw = Marshal.ReadByte(data, offset) | (Marshal.ReadByte(data, offset + 1) << 8) | (Marshal.ReadByte(data, offset + 2) << 16);
+            value = (raw & 0x800000) != 0 ? raw | unchecked((int)0xff000000) : raw;
+        } else value = Marshal.ReadInt32(data, offset);
+        if (validBits > 0 && validBits < containerBits) value >>= containerBits - validBits;
+        int scaleBits = validBits > 0 && validBits <= containerBits ? validBits : containerBits;
+        return (float)(value / (double)(1L << (scaleBits - 1)));
+    }
+
+    static short ToShort(float value) {
+        if (value >= 1f) return short.MaxValue;
+        if (value <= -1f) return short.MinValue;
+        return (short)(value * 32768f);
     }
 }

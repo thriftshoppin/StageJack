@@ -1,5 +1,21 @@
 # Changelog
 
+## 0.6.0
+- Added a per-user Windows installer with Start Menu shortcut, optional desktop shortcut, launch-after-install, and uninstall support.
+- Added executable version metadata and a repeatable packaging script; the app and installer can both be Authenticode-signed from a certificate in the current user's store.
+- Fixed the EQ analysis tap to capture the selected Windows playback endpoint independently of StageJack's processing route, including Razer Surround configurations.
+- Device selectors now use electric-blue labels with dropdown arrows and no "CHANGE" hints.
+- Rebuilt the EQ area around the live spectrum canvas, with Low/Mid/High controls and gain nodes layered directly over the visualizer; advanced 10-band controls stay connected below it.
+- The spectrum visualizer has an independent analysis tap: it defaults to the Windows playback output but can be pointed at any active render device, with the selected input as fallback when playback is silent.
+- Capture decoding now distinguishes 32-bit extensible PCM from float audio and supports 8-, 16-, 24-, and 32-bit PCM inputs.
+- Per-section power toggles neutralize stage, reflection, or EQ processing while preserving the saved slider values.
+- Replaced the section-by-section interface with one fixed-size widget page containing device routing, stage and reverb controls, and the live spectrum / EQ visualizer.
+- Minimize sends StageJack to the system tray; double-click restores it and the tray menu includes Open and Exit.
+- Unified the signal accent around the existing warm magenta palette.
+- Renamed the device labels to **MIC INPUT** and **AUDIO OUTPUT**, with electric-blue label text.
+- Added independent power toggles for stage, reflection, and EQ; disabled sections use neutral processing values while retaining their saved slider settings.
+- Audio processing and its existing controls remain connected to the same engine and saved settings.
+
 ## 0.5.0
 - **Reverb spaces:** new Space dropdown in Reverb / Separation with six named presets (Campus, Rhythm, Classroom, Dorm, Union, Innovation). A preset sets Reverb amount, size, tone, width and pre-delay (0-5 ms). Clarity and Smoothness are left alone. Editing any of those five sliders returns to Custom. The choice is saved in `settings.ini`.
 - **Shorter minimum tail:** Reverb size now maps to 0.3 s - 7.2 s (was 0.6 s - 7.2 s) so small rooms are possible. Existing size settings sound slightly shorter than before.
