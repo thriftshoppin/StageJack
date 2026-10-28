@@ -112,4 +112,4 @@ Version 0.3.0. The 0.2.0 and 0.3.0 changes were written without a Windows compil
 ## Credits and notices
 - UI font: Rajdhani, licensed under the SIL Open Font License (`assets/fonts/Rajdhani-OFL.txt`).
 - VB-CABLE is a separate product by VB-Audio. Razer, Windows Sonic and other names are trademarks of their owners. StageJack is not affiliated with or endorsed by any of them.
-- **License:** not chosen yet. Add a `LICENSE` file (for example MIT) before publishing publicly.
+- **License:** [MIT](LICENSE). The bundled Rajdhani font keeps its own SIL Open Font License.
