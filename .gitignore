@@ -4,6 +4,7 @@ release/
 *.exe
 *.pdb
 settings.ini
+signing/artifact-signing.metadata.json
 # editor / OS
 .vs/
 *.user
