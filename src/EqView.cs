@@ -6,7 +6,7 @@ using System.Windows.Forms;
 // ---------- Spectrum analyzer: FFT of the real output, mapped to log-spaced columns ----------
 public sealed class SpectrumAnalyzer {
     public const int Size = 2048;
-    public float FloorDb = -90f, CeilDb = -28f;     // display range (after the +3 dB/octave tilt)
+    public float FloorDb = -96f, CeilDb = -22f;     // display range (after the +3 dB/octave tilt); open enough to show real program material
     public readonly float[] Level;                  // 0..1 per column, smoothed
     readonly int cols; readonly float fs;
     readonly float[] win = new float[Size], re = new float[Size], im = new float[Size], db = new float[Size / 2 + 1];
@@ -61,7 +61,7 @@ public sealed class SpectrumAnalyzer {
                 }
                 n = (v - FloorDb) / (CeilDb - FloorDb); if (n < 0f) n = 0f; if (n > 1f) n = 1f;
             }
-            Level[c] += (n > Level[c] ? 0.55f : 0.10f) * (n - Level[c]);
+            Level[c] += (n > Level[c] ? 0.60f : 0.14f) * (n - Level[c]);
             if (Level[c] < 0.001f) Level[c] = 0f;
         }
     }

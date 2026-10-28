@@ -10,8 +10,8 @@ StageJack is a small standalone Windows app (C# / WinForms). It has no driver, n
 | | |
 |---|---|
 | Platform | Windows 10 / 11 |
-| Audio format | 48 kHz, 16-bit, stereo (Windows MME) |
-| Latency | roughly 60-90 ms (not for live monitoring) |
+| Audio format | 48 kHz internal; WASAPI shared mode on the devices |
+| Latency | roughly 15-30 ms (not for live monitoring) |
 | Needs | a free virtual audio cable, such as [VB-CABLE](https://vb-audio.com/Cable) |
 | Works with | any playback device, and any source (games, music, browsers, virtual-surround software) |
 | Install | none: build once with the compiler built into Windows |
@@ -59,7 +59,8 @@ Never choose *CABLE Input* as StageJack's output: it would feed back into itself
 | | Stage depth | Pushes sound back: darker, slight delay (keep low for max clarity) |
 | | Stage height | Tilts the top end (7.5 kHz) for a taller or lower image |
 | | Output level | Master volume, -12 to +6 dB |
-| Reverb / separation | Reverb size | Tail length, about 0.6 s to 7 s |
+| Reverb / separation | Reverb size | Tail length, about 0.3 s to 7 s |
+| | Space (preset) | Campus, Rhythm, Classroom, Dorm, Union, Innovation: sets Reverb, size, tone, width and pre-delay. Moving any of those switches back to Custom |
 | | Reverb tone | Dark to bright tail |
 | | Reverb pre-delay | 0-60 ms before the tail starts; more keeps the dry sound clean |
 | | Reverb clarity | How much the tail ducks while sound is playing |
@@ -84,11 +85,11 @@ Never choose *CABLE Input* as StageJack's output: it would feed back into itself
 | Symptom | Try |
 |---|---|
 | No sound | Check Input = CABLE Output, Output = your headset, and CABLE Input is the Windows default device |
-| Error 32 on start | Set both devices to 48 kHz in Windows Sound > Properties > Advanced |
+| Error on start / no sound | In Windows Sound settings, leave both devices on shared mode (default). Avoid exclusive mode for the cable or headset while StageJack is running |
 | Choppy or pumping reverb | Raise Smoothness, lower Reverb clarity |
 | Harsh or "peaking" sound | Press Bypass. If it's still harsh, lower the source volume or the CABLE Input volume: the signal is clipped before StageJack |
 | Echo or feedback | Output is set to a CABLE device; change it to your real headset |
-| Occasional glitches | The two devices have different clocks (MME limitation); restart with START |
+| Occasional glitches | The two devices have different clocks; press STOP then START |
 
 ## Build from source
 Windows only. No Visual Studio needed:
@@ -107,7 +108,7 @@ Build-StageJack.cmd, Launch-StageJack.cmd
 See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the signal chain and tuning constants, and [CHANGELOG.md](CHANGELOG.md) for versions.
 
 ## Status
-Version 0.3.0. The 0.2.0 and 0.3.0 changes were written without a Windows compiler to hand, so please report build errors, display problems or audio problems as issues.
+Version 0.5.0. Recent audio changes were written without a Windows compiler to hand, so please report build errors, display problems or audio problems as issues.
 
 ## Credits and notices
 - UI font: Rajdhani, licensed under the SIL Open Font License (`assets/fonts/Rajdhani-OFL.txt`).

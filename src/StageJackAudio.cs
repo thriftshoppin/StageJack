@@ -3,52 +3,174 @@ using System.Collections.Generic;
 using System.Runtime.InteropServices;
 using System.Threading;
 
-// ---------- Windows MME (winmm) interop: works on every Windows version, no extra libraries ----------
-[StructLayout(LayoutKind.Sequential, Pack = 1)]
-public struct WaveFormat { public ushort wFormatTag, nChannels; public uint nSamplesPerSec, nAvgBytesPerSec; public ushort nBlockAlign, wBitsPerSample, cbSize; }
+// ---------- Device list (same shape the UI already uses) ----------
+// Id is the index into the list returned by Inputs()/Outputs(). EndpointId is the Windows device id used by WASAPI.
+public sealed class Device {
+    public int Id;
+    public string Name;
+    public string EndpointId;
+    public override string ToString() { return Name; }
+}
 
-[StructLayout(LayoutKind.Sequential)]
-public struct WaveHdr { public IntPtr lpData; public int dwBufferLength; public int dwBytesRecorded; public IntPtr dwUser; public int dwFlags; public int dwLoops; public IntPtr lpNext; public IntPtr reserved; }
-
-[StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
-public struct WaveInCaps { public ushort Mid, Pid; public uint Ver; [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 32)] public string Name; public uint Formats; public ushort Channels, Reserved; }
-
-[StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
-public struct WaveOutCaps { public ushort Mid, Pid; public uint Ver; [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 32)] public string Name; public uint Formats; public ushort Channels, Reserved; public uint Support; }
-
-public sealed class Device { public int Id; public string Name; public override string ToString() { return Name; } }
-
+// Kept as "Mme" so StageJackApp.cs does not need edits. Internally this is WASAPI device discovery.
 public static class Mme {
-    [DllImport("winmm.dll")] public static extern int waveInGetNumDevs();
-    [DllImport("winmm.dll")] public static extern int waveOutGetNumDevs();
-    [DllImport("winmm.dll", EntryPoint = "waveInGetDevCapsW", CharSet = CharSet.Unicode)] public static extern int waveInGetDevCaps(IntPtr id, ref WaveInCaps c, int size);
-    [DllImport("winmm.dll", EntryPoint = "waveOutGetDevCapsW", CharSet = CharSet.Unicode)] public static extern int waveOutGetDevCaps(IntPtr id, ref WaveOutCaps c, int size);
-    [DllImport("winmm.dll")] public static extern int waveInOpen(out IntPtr h, int dev, ref WaveFormat f, IntPtr cb, IntPtr inst, int flags);
-    [DllImport("winmm.dll")] public static extern int waveInClose(IntPtr h);
-    [DllImport("winmm.dll")] public static extern int waveInPrepareHeader(IntPtr h, IntPtr hdr, int size);
-    [DllImport("winmm.dll")] public static extern int waveInUnprepareHeader(IntPtr h, IntPtr hdr, int size);
-    [DllImport("winmm.dll")] public static extern int waveInAddBuffer(IntPtr h, IntPtr hdr, int size);
-    [DllImport("winmm.dll")] public static extern int waveInStart(IntPtr h);
-    [DllImport("winmm.dll")] public static extern int waveInStop(IntPtr h);
-    [DllImport("winmm.dll")] public static extern int waveInReset(IntPtr h);
-    [DllImport("winmm.dll")] public static extern int waveOutOpen(out IntPtr h, int dev, ref WaveFormat f, IntPtr cb, IntPtr inst, int flags);
-    [DllImport("winmm.dll")] public static extern int waveOutClose(IntPtr h);
-    [DllImport("winmm.dll")] public static extern int waveOutPrepareHeader(IntPtr h, IntPtr hdr, int size);
-    [DllImport("winmm.dll")] public static extern int waveOutUnprepareHeader(IntPtr h, IntPtr hdr, int size);
-    [DllImport("winmm.dll")] public static extern int waveOutWrite(IntPtr h, IntPtr hdr, int size);
-    [DllImport("winmm.dll")] public static extern int waveOutReset(IntPtr h);
+    public static List<Device> Inputs() { return WasapiDevices.List(true); }
+    public static List<Device> Outputs() { return WasapiDevices.List(false); }
+}
 
-    public static List<Device> Inputs() {
-        var l = new List<Device>(); int n = waveInGetNumDevs();
-        for (int i = 0; i < n; i++) { var c = new WaveInCaps(); if (waveInGetDevCaps((IntPtr)i, ref c, Marshal.SizeOf(typeof(WaveInCaps))) == 0) l.Add(new Device { Id = i, Name = c.Name }); }
-        return l;
+// ---------- WASAPI COM interop (no third-party libraries) ----------
+static class WasapiNative {
+    public const int DEVICE_STATE_ACTIVE = 0x1;
+    public const int eRender = 0, eCapture = 1;
+    public const int CLSCTX_ALL = 23;
+    public const int AUDCLNT_SHAREMODE_SHARED = 0;
+    public const int AUDCLNT_STREAMFLAGS_EVENTCALLBACK = 0x00040000;
+    public const int AUDCLNT_STREAMFLAGS_NOPERSIST = 0x00080000;
+    public const int AUDCLNT_BUFFERFLAGS_SILENT = 0x2;
+    public const int STGM_READ = 0;
+    public static readonly Guid IID_IAudioClient = new Guid("1CB9AD4C-DBFA-4c32-B178-C2F568A703B2");
+    public static readonly Guid IID_IAudioCaptureClient = new Guid("C8ADBD64-E71E-48a0-A4DE-185C395CD317");
+    public static readonly Guid IID_IAudioRenderClient = new Guid("F294ACFC-3146-4483-A7BF-ADDCA43E81D0");
+    public static readonly Guid IID_IMMDeviceEnumerator = new Guid("A95664D2-9614-4F35-A746-DE8DB63617E6");
+    public static readonly Guid CLSID_MMDeviceEnumerator = new Guid("BCDE0395-E52F-467C-8E3D-C4579291692E");
+    public static readonly Guid PKEY_Device_FriendlyName = new Guid("a45c254e-df1c-4efd-8020-67d146a850e0");
+
+    [StructLayout(LayoutKind.Sequential)]
+    public struct PROPERTYKEY { public Guid fmtid; public int pid; }
+
+    [StructLayout(LayoutKind.Sequential, Pack = 2)]
+    public struct WAVEFORMATEX {
+        public ushort wFormatTag, nChannels;
+        public uint nSamplesPerSec, nAvgBytesPerSec;
+        public ushort nBlockAlign, wBitsPerSample, cbSize;
     }
-    public static List<Device> Outputs() {
-        var l = new List<Device>(); int n = waveOutGetNumDevs();
-        for (int i = 0; i < n; i++) { var c = new WaveOutCaps(); if (waveOutGetDevCaps((IntPtr)i, ref c, Marshal.SizeOf(typeof(WaveOutCaps))) == 0) l.Add(new Device { Id = i, Name = c.Name }); }
-        return l;
+
+    [ComImport, Guid("A95664D2-9614-4F35-A746-DE8DB63617E6"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+    public interface IMMDeviceEnumerator {
+        int EnumAudioEndpoints(int dataFlow, int dwStateMask, out IMMDeviceCollection devices);
+        int GetDefaultAudioEndpoint(int dataFlow, int role, out IMMDevice endpoint);
+        int GetDevice([MarshalAs(UnmanagedType.LPWStr)] string pwstrId, out IMMDevice device);
+        int RegisterEndpointNotificationCallback(IntPtr pClient);
+        int UnregisterEndpointNotificationCallback(IntPtr pClient);
+    }
+
+    [ComImport, Guid("0BD7A1BE-7A1A-44DB-8397-CC5392387B5E"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+    public interface IMMDeviceCollection {
+        int GetCount(out int devices);
+        int Item(int device, out IMMDevice endpoint);
+    }
+
+    [ComImport, Guid("D666063F-1587-4E43-81F1-B948E807363F"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+    public interface IMMDevice {
+        int Activate(ref Guid iid, int dwClsCtx, IntPtr pActivationParams, [MarshalAs(UnmanagedType.IUnknown)] out object ppInterface);
+        int OpenPropertyStore(int stgmAccess, out IPropertyStore props);
+        int GetId([MarshalAs(UnmanagedType.LPWStr)] out string ppstrId);
+        int GetState(out int pdwState);
+    }
+
+    [ComImport, Guid("886d8eeb-8cf2-4446-8d02-cdba1dbdcf99"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+    public interface IPropertyStore {
+        int GetCount(out int cProps);
+        int GetAt(int iProp, out PROPERTYKEY pkey);
+        int GetValue(ref PROPERTYKEY key, out PropVariant pv);
+        int SetValue(ref PROPERTYKEY key, ref PropVariant pv);
+        int Commit();
+    }
+
+    // Native PROPVARIANT is 16 bytes on x64 (vt + 6 pad + pointer/value).
+    [StructLayout(LayoutKind.Explicit, Size = 16)]
+    public struct PropVariant {
+        [FieldOffset(0)] public ushort vt;
+        [FieldOffset(8)] public IntPtr pointerValue;
+    }
+
+    [ComImport, Guid("1CB9AD4C-DBFA-4c32-B178-C2F568A703B2"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+    public interface IAudioClient {
+        int Initialize(int shareMode, int streamFlags, long hnsBufferDuration, long hnsPeriodicity, IntPtr pFormat, [In] ref Guid audioSessionGuid);
+        int GetBufferSize(out int pNumBufferFrames);
+        int GetStreamLatency(out long phnsLatency);
+        int GetCurrentPadding(out int pNumPaddingFrames);
+        int IsFormatSupported(int shareMode, IntPtr pFormat, out IntPtr ppClosestMatch);
+        int GetMixFormat(out IntPtr ppDeviceFormat);
+        int GetDevicePeriod(out long phnsDefaultDevicePeriod, out long phnsMinimumDevicePeriod);
+        int Start();
+        int Stop();
+        int Reset();
+        int SetEventHandle(IntPtr eventHandle);
+        int GetService(ref Guid riid, [MarshalAs(UnmanagedType.IUnknown)] out object ppv);
+    }
+
+    [ComImport, Guid("C8ADBD64-E71E-48a0-A4DE-185C395CD317"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+    public interface IAudioCaptureClient {
+        int GetBuffer(out IntPtr ppData, out int pNumFramesToRead, out int pdwFlags, out long pu64DevicePosition, out long pu64QPCPosition);
+        int ReleaseBuffer(int numFramesRead);
+        int GetNextPacketSize(out int pNumFramesInNextPacket);
+    }
+
+    [ComImport, Guid("F294ACFC-3146-4483-A7BF-ADDCA43E81D0"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+    public interface IAudioRenderClient {
+        int GetBuffer(int numFramesRequested, out IntPtr ppData);
+        int ReleaseBuffer(int numFramesWritten, int dwFlags);
+    }
+
+    [DllImport("ole32.dll")] public static extern int CoCreateInstance([In] ref Guid clsid, IntPtr punkOuter, int dwClsCtx, [In] ref Guid iid, [MarshalAs(UnmanagedType.IUnknown)] out object ppv);
+    [DllImport("ole32.dll")] public static extern void CoTaskMemFree(IntPtr pv);
+    [DllImport("ole32.dll")] public static extern int PropVariantClear(ref PropVariant pvar);
+
+    public static IMMDeviceEnumerator CreateEnumerator() {
+        Guid clsid = CLSID_MMDeviceEnumerator, iid = IID_IMMDeviceEnumerator;
+        object o;
+        int hr = CoCreateInstance(ref clsid, IntPtr.Zero, CLSCTX_ALL, ref iid, out o);
+        if (hr != 0 || o == null) throw new Exception("Could not reach Windows audio (error " + hr + ").");
+        return (IMMDeviceEnumerator)o;
+    }
+
+    public static string FriendlyName(IMMDevice dev) {
+        try {
+            IPropertyStore store;
+            if (dev.OpenPropertyStore(STGM_READ, out store) != 0 || store == null) return null;
+            PROPERTYKEY key = new PROPERTYKEY { fmtid = PKEY_Device_FriendlyName, pid = 14 };
+            PropVariant pv;
+            if (store.GetValue(ref key, out pv) != 0) return null;
+            string s = null;
+            if (pv.vt == 31 && pv.pointerValue != IntPtr.Zero) s = Marshal.PtrToStringUni(pv.pointerValue); // VT_LPWSTR
+            PropVariantClear(ref pv);
+            return s;
+        } catch { return null; }
     }
 }
+
+static class WasapiDevices {
+    public static List<Device> List(bool capture) {
+        var list = new List<Device>();
+        WasapiNative.IMMDeviceEnumerator en = null;
+        try {
+            en = WasapiNative.CreateEnumerator();
+            WasapiNative.IMMDeviceCollection col;
+            int flow = capture ? WasapiNative.eCapture : WasapiNative.eRender;
+            if (en.EnumAudioEndpoints(flow, WasapiNative.DEVICE_STATE_ACTIVE, out col) != 0 || col == null) return list;
+            int count;
+            col.GetCount(out count);
+            for (int i = 0; i < count; i++) {
+                WasapiNative.IMMDevice dev;
+                if (col.Item(i, out dev) != 0 || dev == null) continue;
+                string id;
+                dev.GetId(out id);
+                string name = WasapiNative.FriendlyName(dev);
+                if (string.IsNullOrEmpty(name)) name = id ?? ("Device " + i);
+                list.Add(new Device { Id = list.Count, Name = name, EndpointId = id });
+            }
+        } catch { }
+        return list;
+    }
+
+    public static string EndpointIdAt(bool capture, int index) {
+        List<Device> l = List(capture);
+        if (index < 0 || index >= l.Count) return null;
+        return l[index].EndpointId;
+    }
+}
+
 
 // ---------- Signal processing ----------
 sealed class Biquad {
@@ -204,7 +326,7 @@ public sealed class Dsp {
         tWidth = pWidth / 50f;
         float d = pDepth / 100f, r = pRev / 100f;
         preSamp = Math.Min(4000, (int)((pPre * 0.001f + d * 0.04f) * fs));
-        double rt = 0.6 * Math.Pow(12.0, pSize / 100.0);
+        double rt = 0.3 * Math.Pow(24.0, pSize / 100.0);   // 0.3 s .. 7.2 s (RT60)
         for (int i = 0; i < 8; i++) fl[i].Gain = (float)Math.Pow(10.0, -3.0 * fl[i].Len / (fs * rt));
         damp = 0.6f - 0.55f * pTone / 100f;
         float sm = pSmooth / 100f;
@@ -272,76 +394,284 @@ public sealed class Dsp {
     }
 }
 
-// ---------- Capture -> process -> playback ----------
+
+// ---------- Capture -> process -> playback (WASAPI shared mode) ----------
+// Same public surface as before so the window code does not need changes:
+//   AudioEngine.Rate, .Dsp, .Error, .Running, .Start(inId, outId), .Stop()
+// Target latency: about 15-30 ms (was 60-90 ms with MME).
+// Virtual devices (Sunshine, some cable drivers) can invalidate mid-stream; the engine
+// reconnects in-thread instead of dying on the first glitch.
 public sealed class AudioEngine {
-    public const int Rate = 48000, FramesPer = 480, InBufs = 4, OutBufs = 6;
-    const int CALLBACK_EVENT = 0x50000, WHDR_DONE = 1, WHDR_INQUEUE = 0x10;
-    static readonly int OffLen = (int)Marshal.OffsetOf(typeof(WaveHdr), "dwBufferLength");
-    static readonly int OffRec = (int)Marshal.OffsetOf(typeof(WaveHdr), "dwBytesRecorded");
-    static readonly int OffFlags = (int)Marshal.OffsetOf(typeof(WaveHdr), "dwFlags");
+    public const int Rate = 48000;
+    // Requested buffer duration in 100-nanosecond units (10 ms). Shared mode rounds to the device period.
+    const long HnsBuffer = 100000 * 10;
+    // Common transient WASAPI failures on virtual endpoints
+    const int AUDCLNT_E_DEVICE_INVALIDATED = unchecked((int)0x88890004);
+    const int AUDCLNT_E_SERVICE_NOT_RUNNING = unchecked((int)0x88890010);
+    const int AUDCLNT_E_NOT_INITIALIZED = unchecked((int)0x88890001);
+    const int AUDCLNT_E_ENDPOINT_CREATE_FAILED = unchecked((int)0x8889000F);
+
     public readonly Dsp Dsp = new Dsp(Rate);
     public volatile string Error;
-    Thread th; volatile bool run; int inDev, outDev;
+    Thread th; volatile bool run;
+    string inEndpoint, outEndpoint;
     public bool Running { get { return th != null && th.IsAlive; } }
 
     public void Start(int inId, int outId) {
-        Stop(); Error = null; inDev = inId; outDev = outId; run = true;
+        Stop();
+        Error = null;
+        inEndpoint = WasapiDevices.EndpointIdAt(true, inId);
+        outEndpoint = WasapiDevices.EndpointIdAt(false, outId);
+        if (string.IsNullOrEmpty(inEndpoint)) { Error = "Could not find that input device. Press Refresh and try again."; return; }
+        if (string.IsNullOrEmpty(outEndpoint)) { Error = "Could not find that output device. Press Refresh and try again."; return; }
+        run = true;
         th = new Thread(Run); th.IsBackground = true; th.Priority = ThreadPriority.Highest; th.Name = "StageJack audio"; th.Start();
     }
-    public void Stop() { run = false; if (th != null) { th.Join(2000); th = null; } }
+    public void Stop() { run = false; if (th != null) { th.Join(3000); th = null; } }
 
-    static void Check(int r, string what) {
-        if (r != 0) throw new Exception("Could not " + what + " (Windows audio error " + r + (r == 32 ? ": device rejected 48 kHz 16-bit stereo" : r == 4 ? ": device is busy or unavailable" : "") + ").");
+    static int FloatBits(float f) { return BitConverter.ToInt32(BitConverter.GetBytes(f), 0); }
+    static bool Transient(int hr) {
+        return hr == AUDCLNT_E_DEVICE_INVALIDATED || hr == AUDCLNT_E_SERVICE_NOT_RUNNING
+            || hr == AUDCLNT_E_NOT_INITIALIZED || hr == AUDCLNT_E_ENDPOINT_CREATE_FAILED
+            || hr == unchecked((int)0x8007001F) // ERROR_GEN_FAILURE – common on virtual pins
+            || hr == unchecked((int)0x80070057); // E_INVALIDARG from some cable drivers on re-init
     }
-    static void Alloc(out IntPtr hdr, out IntPtr data, int bytes, int hs) {
-        hdr = Marshal.AllocHGlobal(hs); data = Marshal.AllocHGlobal(bytes);
-        for (int i = 0; i < hs; i++) Marshal.WriteByte(hdr, i, 0);
-        for (int i = 0; i < bytes; i++) Marshal.WriteByte(data, i, 0);
-        Marshal.WriteIntPtr(hdr, 0, data); Marshal.WriteInt32(hdr, OffLen, bytes);
+    static void Hr(int hr, string what) {
+        if (hr < 0) throw new Exception("Could not " + what + " (Windows audio error 0x" + hr.ToString("X8") + ").");
+    }
+    static string FriendlyFail(Exception e) {
+        string m = e.Message ?? "";
+        if (m.IndexOf("0x88890004", StringComparison.OrdinalIgnoreCase) >= 0)
+            return "The audio device was unplugged or reset (common with virtual cables / Sunshine). StageJack will keep trying.";
+        return m;
+    }
+
+    // Opens one WASAPI client. Tries event-driven first; falls back to pull mode for drivers that hate EVENTCALLBACK.
+    static WasapiNative.IAudioClient OpenClient(string endpointId, bool capture, AutoResetEvent frameEvent, bool useEvent, out IntPtr mixFormat, out int bufferFrames, out int frameBytes, out int channels, out bool float32, out bool eventArmed) {
+        eventArmed = false;
+        WasapiNative.IMMDeviceEnumerator en = WasapiNative.CreateEnumerator();
+        WasapiNative.IMMDevice dev;
+        Hr(en.GetDevice(endpointId, out dev), capture ? "open the input device" : "open the headset or speakers");
+        object o;
+        Guid iid = WasapiNative.IID_IAudioClient;
+        Hr(dev.Activate(ref iid, WasapiNative.CLSCTX_ALL, IntPtr.Zero, out o), "activate audio on that device");
+        WasapiNative.IAudioClient client = (WasapiNative.IAudioClient)o;
+        Hr(client.GetMixFormat(out mixFormat), "read the device format");
+        WasapiNative.WAVEFORMATEX fmt = (WasapiNative.WAVEFORMATEX)Marshal.PtrToStructure(mixFormat, typeof(WasapiNative.WAVEFORMATEX));
+        channels = fmt.nChannels < 1 ? 1 : fmt.nChannels;
+        int bits = fmt.wBitsPerSample;
+        float32 = (fmt.wFormatTag == 3) || (fmt.wFormatTag == 0xFFFE && bits == 32);
+        if (!float32 && bits == 0) bits = 16;
+        frameBytes = (bits / 8) * channels;
+        if (frameBytes <= 0) frameBytes = 4 * channels;
+
+        Guid session = Guid.Empty;
+        int flags = WasapiNative.AUDCLNT_STREAMFLAGS_NOPERSIST;
+        if (useEvent) flags |= WasapiNative.AUDCLNT_STREAMFLAGS_EVENTCALLBACK;
+        int hr = client.Initialize(WasapiNative.AUDCLNT_SHAREMODE_SHARED, flags, HnsBuffer, 0, mixFormat, ref session);
+        if (hr < 0 && useEvent) {
+            // Driver rejected event mode – rebuild client in pull mode
+            WasapiNative.CoTaskMemFree(mixFormat); mixFormat = IntPtr.Zero;
+            Hr(dev.Activate(ref iid, WasapiNative.CLSCTX_ALL, IntPtr.Zero, out o), "activate audio on that device");
+            client = (WasapiNative.IAudioClient)o;
+            Hr(client.GetMixFormat(out mixFormat), "read the device format");
+            fmt = (WasapiNative.WAVEFORMATEX)Marshal.PtrToStructure(mixFormat, typeof(WasapiNative.WAVEFORMATEX));
+            channels = fmt.nChannels < 1 ? 1 : fmt.nChannels;
+            bits = fmt.wBitsPerSample;
+            float32 = (fmt.wFormatTag == 3) || (fmt.wFormatTag == 0xFFFE && bits == 32);
+            if (!float32 && bits == 0) bits = 16;
+            frameBytes = (bits / 8) * channels;
+            if (frameBytes <= 0) frameBytes = 4 * channels;
+            session = Guid.Empty;
+            flags = WasapiNative.AUDCLNT_STREAMFLAGS_NOPERSIST;
+            hr = client.Initialize(WasapiNative.AUDCLNT_SHAREMODE_SHARED, flags, HnsBuffer, 0, mixFormat, ref session);
+        }
+        Hr(hr, capture ? "start listening on the input" : "start playing on the output");
+        if (useEvent && (flags & WasapiNative.AUDCLNT_STREAMFLAGS_EVENTCALLBACK) != 0) {
+            hr = client.SetEventHandle(frameEvent.SafeWaitHandle.DangerousGetHandle());
+            if (hr >= 0) eventArmed = true;
+        }
+        Hr(client.GetBufferSize(out bufferFrames), "read the buffer size");
+        return client;
+    }
+
+    static void CloseSession(ref WasapiNative.IAudioClient inClient, ref WasapiNative.IAudioClient outClient, ref IntPtr inFmt, ref IntPtr outFmt) {
+        try { if (inClient != null) inClient.Stop(); } catch { }
+        try { if (outClient != null) outClient.Stop(); } catch { }
+        if (inFmt != IntPtr.Zero) { WasapiNative.CoTaskMemFree(inFmt); inFmt = IntPtr.Zero; }
+        if (outFmt != IntPtr.Zero) { WasapiNative.CoTaskMemFree(outFmt); outFmt = IntPtr.Zero; }
+        inClient = null; outClient = null;
     }
 
     void Run() {
-        IntPtr hin = IntPtr.Zero, hout = IntPtr.Zero; bool started = false;
-        IntPtr[] ih = new IntPtr[InBufs], idat = new IntPtr[InBufs], oh = new IntPtr[OutBufs], odat = new IntPtr[OutBufs];
-        int hs = Marshal.SizeOf(typeof(WaveHdr)), bytes = FramesPer * 4;
-        var ev = new AutoResetEvent(false); short[] tmp = new short[FramesPer * 2];
+        AutoResetEvent inEv = new AutoResetEvent(false);
+        AutoResetEvent outEv = new AutoResetEvent(false);
+        int openFails = 0;
         try {
-            var f = new WaveFormat { wFormatTag = 1, nChannels = 2, nSamplesPerSec = Rate, nAvgBytesPerSec = Rate * 4, nBlockAlign = 4, wBitsPerSample = 16, cbSize = 0 };
-            Check(Mme.waveInOpen(out hin, inDev, ref f, ev.SafeWaitHandle.DangerousGetHandle(), IntPtr.Zero, CALLBACK_EVENT), "open the input device");
-            Check(Mme.waveOutOpen(out hout, outDev, ref f, IntPtr.Zero, IntPtr.Zero, 0), "open the output device");
-            for (int i = 0; i < InBufs; i++) { Alloc(out ih[i], out idat[i], bytes, hs); Check(Mme.waveInPrepareHeader(hin, ih[i], hs), "prepare input"); Check(Mme.waveInAddBuffer(hin, ih[i], hs), "queue input"); }
-            for (int i = 0; i < OutBufs; i++) { Alloc(out oh[i], out odat[i], bytes, hs); Check(Mme.waveOutPrepareHeader(hout, oh[i], hs), "prepare output"); }
-            for (int i = 0; i < 3; i++) Check(Mme.waveOutWrite(hout, oh[i], hs), "start output");
-            Check(Mme.waveInStart(hin), "start capture"); started = true;
-            int next = 0;
             while (run) {
-                ev.WaitOne(30);
-                while (run) {
-                    if ((Marshal.ReadInt32(ih[next], OffFlags) & WHDR_DONE) == 0) break;
-                    int frames = Marshal.ReadInt32(ih[next], OffRec) / 4;
-                    if (frames > 0) {
-                        int o = -1;
-                        for (int k = 0; k < OutBufs; k++) if ((Marshal.ReadInt32(oh[k], OffFlags) & WHDR_INQUEUE) == 0) { o = k; break; }
-                        if (o >= 0) {
-                            Marshal.Copy(idat[next], tmp, 0, frames * 2);
-                            Dsp.Process(tmp, frames);
-                            Marshal.Copy(tmp, 0, odat[o], frames * 2);
-                            Marshal.WriteInt32(oh[o], OffLen, frames * 4);
-                            if (Mme.waveOutWrite(hout, oh[o], hs) != 0) throw new Exception("Output device disconnected.");
+                WasapiNative.IAudioClient inClient = null, outClient = null;
+                WasapiNative.IAudioCaptureClient capture = null;
+                WasapiNative.IAudioRenderClient render = null;
+                IntPtr inFmt = IntPtr.Zero, outFmt = IntPtr.Zero;
+                try {
+                    int inBufFrames, outBufFrames, inFrameBytes, outFrameBytes, inCh, outCh;
+                    bool inFloat, outFloat, inEvent, outEvent;
+                    inClient = OpenClient(inEndpoint, true, inEv, true, out inFmt, out inBufFrames, out inFrameBytes, out inCh, out inFloat, out inEvent);
+                    outClient = OpenClient(outEndpoint, false, outEv, true, out outFmt, out outBufFrames, out outFrameBytes, out outCh, out outFloat, out outEvent);
+
+                    object svc;
+                    Guid iidCap = WasapiNative.IID_IAudioCaptureClient, iidRen = WasapiNative.IID_IAudioRenderClient;
+                    Hr(inClient.GetService(ref iidCap, out svc), "reach the capture service"); capture = (WasapiNative.IAudioCaptureClient)svc;
+                    Hr(outClient.GetService(ref iidRen, out svc), "reach the playback service"); render = (WasapiNative.IAudioRenderClient)svc;
+
+                    int maxFrames = Math.Max(inBufFrames, outBufFrames) + 32;
+                    short[] dspBuf = new short[maxFrames * 2];
+                    float[] fTmp = new float[maxFrames * Math.Max(Math.Max(inCh, outCh), 2)];
+
+                    int pad;
+                    outClient.GetCurrentPadding(out pad);
+                    int prime = outBufFrames - pad;
+                    if (prime > 0) {
+                        IntPtr pSilent;
+                        if (render.GetBuffer(prime, out pSilent) == 0 && pSilent != IntPtr.Zero) {
+                            int bytes = prime * outFrameBytes;
+                            for (int i = 0; i < bytes; i++) Marshal.WriteByte(pSilent, i, 0);
+                            render.ReleaseBuffer(prime, WasapiNative.AUDCLNT_BUFFERFLAGS_SILENT);
                         }
                     }
-                    if (Mme.waveInAddBuffer(hin, ih[next], hs) != 0) throw new Exception("Input device disconnected.");
-                    next = (next + 1) % InBufs;
+
+                    Hr(inClient.Start(), "start capture");
+                    Hr(outClient.Start(), "start playback");
+                    openFails = 0;
+                    Error = null; // clear any earlier transient message once we are live
+
+                    WaitHandle[] waits = new WaitHandle[] { inEv, outEv };
+                    bool useWait = inEvent || outEvent;
+                    int idleTicks = 0;
+
+                    while (run) {
+                        if (useWait) WaitHandle.WaitAny(waits, 15);
+                        else Thread.Sleep(5);
+
+                        bool gotData = false;
+                        while (run) {
+                            int packet;
+                            int hrPkt = capture.GetNextPacketSize(out packet);
+                            if (hrPkt < 0) {
+                                if (Transient(hrPkt)) throw new Exception("Device reset while listening (0x" + hrPkt.ToString("X8") + ").");
+                                break;
+                            }
+                            if (packet == 0) break;
+
+                            IntPtr data;
+                            int frames, flags;
+                            long pos, qpc;
+                            int hr = capture.GetBuffer(out data, out frames, out flags, out pos, out qpc);
+                            if (hr < 0) {
+                                if (Transient(hr)) throw new Exception("Device reset while listening (0x" + hr.ToString("X8") + ").");
+                                break;
+                            }
+                            if (frames <= 0) { capture.ReleaseBuffer(0); break; }
+                            if (frames > maxFrames) frames = maxFrames;
+                            bool silent = (flags & WasapiNative.AUDCLNT_BUFFERFLAGS_SILENT) != 0;
+                            gotData = true;
+
+                            if (silent || data == IntPtr.Zero) {
+                                for (int i = 0; i < frames * 2; i++) dspBuf[i] = 0;
+                            } else if (inFloat) {
+                                int n = frames * inCh;
+                                Marshal.Copy(data, fTmp, 0, n);
+                                for (int i = 0; i < frames; i++) {
+                                    float L = fTmp[i * inCh];
+                                    float R = inCh > 1 ? fTmp[i * inCh + 1] : L;
+                                    if (L > 1f) L = 1f; else if (L < -1f) L = -1f;
+                                    if (R > 1f) R = 1f; else if (R < -1f) R = -1f;
+                                    dspBuf[i * 2] = (short)(L * 32767f);
+                                    dspBuf[i * 2 + 1] = (short)(R * 32767f);
+                                }
+                            } else {
+                                int bytesPerSamp = inFrameBytes / inCh;
+                                if (bytesPerSamp == 2) {
+                                    for (int i = 0; i < frames; i++) {
+                                        dspBuf[i * 2] = Marshal.ReadInt16(data, i * inFrameBytes);
+                                        dspBuf[i * 2 + 1] = inCh > 1 ? Marshal.ReadInt16(data, i * inFrameBytes + 2) : dspBuf[i * 2];
+                                    }
+                                } else {
+                                    for (int i = 0; i < frames * 2; i++) dspBuf[i] = 0;
+                                }
+                            }
+                            capture.ReleaseBuffer(frames);
+
+                            Dsp.Process(dspBuf, frames);
+
+                            int outPad;
+                            int hrPad = outClient.GetCurrentPadding(out outPad);
+                            if (hrPad < 0) {
+                                if (Transient(hrPad)) throw new Exception("Device reset while playing (0x" + hrPad.ToString("X8") + ").");
+                                continue;
+                            }
+                            int room = outBufFrames - outPad;
+                            if (room <= 0) continue;
+                            int write = frames < room ? frames : room;
+                            IntPtr outPtr;
+                            int hrGet = render.GetBuffer(write, out outPtr);
+                            if (hrGet < 0 || outPtr == IntPtr.Zero) {
+                                if (Transient(hrGet)) throw new Exception("Device reset while playing (0x" + hrGet.ToString("X8") + ").");
+                                continue;
+                            }
+
+                            if (outFloat) {
+                                for (int i = 0; i < write; i++) {
+                                    float L = dspBuf[i * 2] / 32768f;
+                                    float R = dspBuf[i * 2 + 1] / 32768f;
+                                    for (int c = 0; c < outCh; c++) {
+                                        float sv = (c == 0) ? L : (c == 1 ? R : 0f);
+                                        Marshal.WriteInt32(outPtr, (i * outCh + c) * 4, FloatBits(sv));
+                                    }
+                                }
+                            } else {
+                                for (int i = 0; i < write; i++) {
+                                    short L = dspBuf[i * 2], R = dspBuf[i * 2 + 1];
+                                    for (int c = 0; c < outCh; c++) {
+                                        short sv = (c == 0) ? L : (c == 1 ? R : (short)0);
+                                        Marshal.WriteInt16(outPtr, i * outFrameBytes + c * 2, sv);
+                                    }
+                                }
+                            }
+                            int hrRel = render.ReleaseBuffer(write, 0);
+                            if (hrRel < 0 && Transient(hrRel))
+                                throw new Exception("Device reset while playing (0x" + hrRel.ToString("X8") + ").");
+                        }
+
+                        if (gotData) idleTicks = 0;
+                        else {
+                            idleTicks++;
+                            // No capture packets for a long stretch is normal when silence is playing;
+                            // only bail if the client itself starts failing (handled above).
+                            if (idleTicks > 2000) idleTicks = 0;
+                        }
+                    }
+                }
+                catch (Exception e) {
+                    CloseSession(ref inClient, ref outClient, ref inFmt, ref outFmt);
+                    if (!run) break;
+                    openFails++;
+                    Error = FriendlyFail(e);
+                    // Stay in-thread and retry: virtual devices (Sunshine jack, some cables) flap.
+                    // After many failures, surface the error but keep trying until the user hits STOP.
+                    int delay = openFails < 3 ? 200 : (openFails < 10 ? 500 : 1500);
+                    int waited = 0;
+                    while (run && waited < delay) { Thread.Sleep(50); waited += 50; }
+                    continue;
+                }
+                finally {
+                    CloseSession(ref inClient, ref outClient, ref inFmt, ref outFmt);
                 }
             }
         }
-        catch (Exception e) { Error = e.Message; }
         finally {
-            if (hin != IntPtr.Zero) { if (started) Mme.waveInStop(hin); Mme.waveInReset(hin); for (int i = 0; i < InBufs; i++) if (ih[i] != IntPtr.Zero) Mme.waveInUnprepareHeader(hin, ih[i], hs); Mme.waveInClose(hin); }
-            if (hout != IntPtr.Zero) { Mme.waveOutReset(hout); for (int i = 0; i < OutBufs; i++) if (oh[i] != IntPtr.Zero) Mme.waveOutUnprepareHeader(hout, oh[i], hs); Mme.waveOutClose(hout); }
-            for (int i = 0; i < InBufs; i++) { if (ih[i] != IntPtr.Zero) Marshal.FreeHGlobal(ih[i]); if (idat[i] != IntPtr.Zero) Marshal.FreeHGlobal(idat[i]); }
-            for (int i = 0; i < OutBufs; i++) { if (oh[i] != IntPtr.Zero) Marshal.FreeHGlobal(oh[i]); if (odat[i] != IntPtr.Zero) Marshal.FreeHGlobal(odat[i]); }
-            ev.Close();
+            inEv.Close();
+            outEv.Close();
         }
     }
 }

@@ -13,6 +13,26 @@ static class Program {
     }
 }
 
+// Named reverb spaces. Values come from measured behavior of the reference reverb (decay, tone, width, level, pre-delay), not from copied audio.
+// EDIT THIS TABLE to tune a space. T30 = seconds for the tail to fall 30 dB; Tone 0 (dark) - 100 (bright); Width 0-100; Wet = Reverb amount 0-100; Pre = pre-delay ms (keep 0-5).
+sealed class ReverbSpace {
+    public readonly string Name; public readonly float T30; public readonly int Tone, Width, Wet, Pre;
+    public ReverbSpace(string name, float t30, int tone, int width, int wet, int pre) { Name = name; T30 = t30; Tone = tone; Width = width; Wet = wet; Pre = pre; }
+    public static readonly ReverbSpace[] All = {
+        new ReverbSpace("Campus",     0.55f, 80,  70, 25, 2),   // brightest
+        new ReverbSpace("Rhythm",     0.35f, 60,  60, 15, 0),   // quieter
+        new ReverbSpace("Classroom",  0.18f, 55,  50, 15, 0),   // shortest, quieter
+        new ReverbSpace("Dorm",       0.45f, 25,  80, 35, 3),   // dark, louder
+        new ReverbSpace("Union",      0.90f, 20,  90, 40, 4),   // longest, dark, louder
+        new ReverbSpace("Innovation", 0.70f, 45,  85, 38, 2)    // louder
+    };
+    // Engine tail length is RT60 = 0.3 * 24^(size/100) seconds, and RT60 is about 2 x T30
+    public static int SizeFor(float t30) {
+        double s = 100.0 * Math.Log(2.0 * t30 / 0.3) / Math.Log(24.0);
+        return (int)Math.Max(0, Math.Min(100, Math.Round(s)));
+    }
+}
+
 sealed class MainWindow : Form {
     readonly Color accent = Theme.Accent, bg = Color.FromArgb(11, 13, 13), card = Color.FromArgb(23, 27, 26), muted = Color.FromArgb(160, 170, 166), white = Color.FromArgb(238, 242, 240);
     readonly Dictionary<string, StageSlider> sliders = new Dictionary<string, StageSlider>();
@@ -23,7 +43,8 @@ sealed class MainWindow : Form {
     readonly Label status;
     readonly PrivateFontCollection fonts = new PrivateFontCollection();
     Font regular, strong, display, small;
-    ComboBox inBox, outBox; Button startBtn, bypassBtn;
+    ComboBox inBox, outBox, spaceBox; bool applyingSpace; Button startBtn, bypassBtn;
+    static readonly string[] spaceSliders = { "Reverb", "Reverb size", "Reverb tone", "Reverb pre-delay", "Reverb width" };
     EqView eqView; CheckBox advChk; Panel eqSection, bandPanel, vp; Timer viewTimer;
     readonly SpectrumAnalyzer analyzer = new SpectrumAnalyzer(128, AudioEngine.Rate); readonly float[] fftBuf = new float[SpectrumAnalyzer.Size];
     bool ready, wantRun, waiting; int tries, autoFails; DateTime lastStart = DateTime.MinValue; string wantIn, wantOut;
@@ -68,13 +89,18 @@ sealed class MainWindow : Form {
         AddSlider(stage, "Stage height", 278, 0, 100, 50, "LOW", "TALL", "");
         AddSlider(stage, "Output level", 357, -12, 6, 0, "QUIETER", "LOUDER", " dB");
 
-        Panel rev = Section(viewport, "REVERB  /  SEPARATION", 530);
-        AddSlider(rev, "Reverb size", 42, 0, 100, 75, "SHORT", "HUGE", "");
-        AddSlider(rev, "Reverb tone", 120, 0, 100, 60, "DARK", "BRIGHT", "");
-        AddSlider(rev, "Reverb pre-delay", 199, 0, 60, 30, "0 MS", "60 MS", " ms");
-        AddSlider(rev, "Reverb clarity", 278, 0, 100, 50, "OFF", "MAX", "");
-        AddSlider(rev, "Reverb width", 357, 0, 100, 100, "CENTER", "WIDE", "");
-        AddSlider(rev, "Smoothness", 436, 0, 100, 60, "TIGHT", "SMOOTH", "");
+        Panel rev = Section(viewport, "REVERB  /  SEPARATION", 608);
+        rev.Controls.Add(MakeLabel("SPACE  /  preset", 18, 42));
+        spaceBox = MakeCombo(66); spaceBox.Items.Add("Custom");
+        foreach (ReverbSpace sp in ReverbSpace.All) spaceBox.Items.Add(sp.Name);
+        spaceBox.SelectedIndex = 0; rev.Controls.Add(spaceBox);
+        AddSlider(rev, "Reverb size", 120, 0, 100, 75, "SHORT", "HUGE", "");
+        AddSlider(rev, "Reverb tone", 198, 0, 100, 60, "DARK", "BRIGHT", "");
+        AddSlider(rev, "Reverb pre-delay", 277, 0, 60, 30, "0 MS", "60 MS", " ms");
+        AddSlider(rev, "Reverb clarity", 356, 0, 100, 50, "OFF", "MAX", "");
+        AddSlider(rev, "Reverb width", 435, 0, 100, 100, "CENTER", "WIDE", "");
+        AddSlider(rev, "Smoothness", 514, 0, 100, 60, "TIGHT", "SMOOTH", "");
+        spaceBox.SelectedIndexChanged += delegate { if (!applyingSpace && ready && spaceBox.SelectedIndex > 0) { ApplySpace(ReverbSpace.All[spaceBox.SelectedIndex - 1]); saveTimer.Stop(); saveTimer.Start(); } };
 
         eqSection = Section(viewport, "EQUALIZER", 500);
         advChk = new CheckBox { Text = "ADVANCED  /  10-BAND", ForeColor = accent, BackColor = card, Font = strong, AutoSize = true, FlatStyle = FlatStyle.Flat, TabStop = false, Cursor = Cursors.Hand, Location = new Point(318, 8) };
@@ -128,7 +154,7 @@ sealed class MainWindow : Form {
         parent.Controls.Add(slider); sliders[name] = slider;
         if (!String.IsNullOrEmpty(left)) parent.Controls.Add(new Label { Text = left, ForeColor = muted, Font = small, AutoSize = true, Location = new Point(18, y + 61) });
         if (!String.IsNullOrEmpty(right)) parent.Controls.Add(new Label { Text = right, ForeColor = muted, Font = small, AutoSize = true, Location = new Point(435, y + 61) });
-        slider.ValueChanged += delegate { output.Text = slider.Value + unit; if (ready) { PushParams(); saveTimer.Stop(); saveTimer.Start(); } };
+        slider.ValueChanged += delegate { output.Text = slider.Value + unit; if (!applyingSpace && spaceBox != null && spaceBox.SelectedIndex != 0 && Array.IndexOf(spaceSliders, name) >= 0) spaceBox.SelectedIndex = 0; if (ready) { PushParams(); saveTimer.Stop(); saveTimer.Start(); } };
     }
 
     void PushParams() {
@@ -162,11 +188,21 @@ sealed class MainWindow : Form {
         analyzer.Analyze(fftBuf, !live);
         eqView.SetSpectrum(analyzer.Level);
     }
+    void ApplySpace(ReverbSpace sp) {
+        applyingSpace = true;
+        try {
+            sliders["Reverb"].Value = sp.Wet; sliders["Reverb size"].Value = ReverbSpace.SizeFor(sp.T30); sliders["Reverb tone"].Value = sp.Tone;
+            sliders["Reverb width"].Value = sp.Width; sliders["Reverb pre-delay"].Value = sp.Pre;
+        } finally { applyingSpace = false; }
+        PushParams();
+    }
     void ResetAll() {
+        applyingSpace = true;
         sliders["Reverb"].Value = 20; sliders["Stage width"].Value = 50; sliders["Stage depth"].Value = 0; sliders["Stage height"].Value = 50; sliders["Output level"].Value = 0;
         sliders["Reverb size"].Value = 75; sliders["Reverb tone"].Value = 60; sliders["Reverb pre-delay"].Value = 30; sliders["Reverb clarity"].Value = 50; sliders["Reverb width"].Value = 100; sliders["Smoothness"].Value = 60;
         sliders["Low"].Value = 0; sliders["Mid"].Value = 0; sliders["High"].Value = 0;
         foreach (string b in bands) sliders[b].Value = 0;
+        applyingSpace = false; spaceBox.SelectedIndex = 0;
     }
 
     // ----- devices -----
@@ -247,15 +283,18 @@ sealed class MainWindow : Form {
     void LoadSaved(out string inName, out string outName) {
         inName = null; outName = null;
         if (!File.Exists(savePath)) return;
+        applyingSpace = true;
         try {
             foreach (string line in File.ReadAllLines(savePath)) {
                 int e = line.IndexOf('='); if (e <= 0) continue;
                 string k = line.Substring(0, e), v = line.Substring(e + 1);
                 if (k == "Input") inName = v; else if (k == "Output") outName = v; else if (k == "Running") wantRun = v == "1";
                 else if (k == "Advanced") advChk.Checked = v == "1";
+                else if (k == "Space") { int si; if (int.TryParse(v, out si) && si >= 0 && si < spaceBox.Items.Count) spaceBox.SelectedIndex = si; }
                 else if (sliders.ContainsKey(k)) { int n; if (int.TryParse(v, out n)) sliders[k].Value = n; }
             }
         } catch { }
+        applyingSpace = false;
     }
     void Save() {
         try {
@@ -264,6 +303,7 @@ sealed class MainWindow : Form {
             if ((wantIn ?? SelName(inBox)) != null) lines.Add("Input=" + (wantIn ?? SelName(inBox)));
             if ((wantOut ?? SelName(outBox)) != null) lines.Add("Output=" + (wantOut ?? SelName(outBox)));
             lines.Add("Advanced=" + (advChk.Checked ? "1" : "0"));
+            lines.Add("Space=" + spaceBox.SelectedIndex);
             lines.Add("Running=" + (engine.Running || wantRun || waiting ? "1" : "0"));
             File.WriteAllLines(savePath, lines.ToArray());
         } catch { }
