@@ -15,6 +15,7 @@
 - Renamed the device labels to **MIC INPUT** and **AUDIO OUTPUT**, with electric-blue label text.
 - Added independent power toggles for stage, reflection, and EQ; disabled sections use neutral processing values while retaining their saved slider settings.
 - Audio processing and its existing controls remain connected to the same engine and saved settings.
+- **Docs:** Clarified that StageJack works with any existing virtual audio device (Razer 7.1, Voicemod, Voicemeeter, Windows Sonic, etc.) — VB-CABLE is only one free option. Added navigable [docs/HELP.md](docs/HELP.md) with per-panel control documentation and FAQ.
 
 ## 0.5.0
 - **Reverb spaces:** new Space dropdown in Reverb / Separation with six named presets (Campus, Rhythm, Classroom, Dorm, Union, Innovation). A preset sets Reverb amount, size, tone, width and pre-delay (0-5 ms). Clarity and Smoothness are left alone. Editing any of those five sliders returns to Custom. The choice is saved in `settings.ini`.
