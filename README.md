@@ -95,24 +95,14 @@ Full per-control documentation lives in **[docs/HELP.md](docs/HELP.md)**.
 | Harsh or "peaking" sound | Press Bypass. If still harsh, lower the source or virtual-device volume — the signal is already clipped before StageJack |
 | Echo or feedback | Output is set to a virtual device; change it to your real headphones/speakers |
 | Occasional glitches | The two devices have different clocks; press STOP then START |
+| Windows says "Windows protected your PC" when running the installer | The installer isn't code-signed yet, so SmartScreen warns about unrecognized apps. Click **More info → Run anyway** if you downloaded it from this repository's Releases page |
 
 ## Build from source
 Windows only. No Visual Studio needed:
 ```
 Build-StageJack.cmd
-Package-StageJack.ps1
 ```
-Build-StageJack.cmd compiles src/*.cs with the C# compiler included with Windows into dist\StageJack.exe and copies the fonts and NAudio WASAPI capture libraries beside it. Package-StageJack.ps1 uses Inno Setup 7 to create a per-user Windows installer. The analyzer uses NAudio 2.2.1 to capture the Windows playback mix or a separately selected render device; .NET Framework 4.8 is required. Keep the C# 5 compatible style.
-
-For public, no-cost code signing, StageJack can apply to the [SignPath Foundation open-source program](https://signpath.org/apply.html). Acceptance is reviewed, not automatic: the project must meet the Foundation's [open-source requirements](https://signpath.org/terms.html), including an OSI-approved license, an existing release, a published code-signing policy, and verifiable builds. The Foundation's certificate identifies **SignPath Foundation** as publisher. Accepted projects submit release builds from GitHub Actions for manual signing approval; set up that workflow after the application is accepted.
-
-If you prefer Microsoft's paid Artifact Signing instead, create an account and certificate profile, complete identity validation, and assign your identity the **Artifact Signing Certificate Profile Signer** role. It has no free or trial tier; review Microsoft's current [setup requirements](https://learn.microsoft.com/en-us/azure/artifact-signing/quickstart) and [pricing](https://learn.microsoft.com/en-us/azure/artifact-signing/how-to-change-sku) first. The client tools, Windows SDK SignTool, and .NET 8 Runtime are needed on the signing PC.
-
-For that paid local-signing option only, copy `signing/artifact-signing.metadata.example.json` to `signing/artifact-signing.metadata.json`, fill in the endpoint, account name, and certificate profile name from Azure, then run:
-```powershell
-.\Package-StageJack.ps1 -ArtifactSigningMetadataPath .\signing\artifact-signing.metadata.json
-```
-The metadata file is ignored by Git. Artifact Signing authenticates using Azure's default credential chain; SignTool applies Microsoft's recommended trusted timestamp. The script signs the app before building the installer, then signs the installer. To use a separately installed signing library, pass `-ArtifactSigningDlibPath <path-to-Azure.CodeSigning.Dlib.dll>`.
+This compiles `src/*.cs` with the C# compiler included with Windows into `dist\StageJack.exe` and copies the fonts and NAudio WASAPI capture libraries beside it. .NET Framework 4.8 is required. Building the installer and signing releases is covered in [docs/RELEASING.md](docs/RELEASING.md).
 
 ## Repository layout
 ```
@@ -120,7 +110,7 @@ src/            C# sources (audio engine + DSP, UI, visual EQ)
 assets/fonts/   Rajdhani (SIL OFL)
 lib/            NAudio 2.2.1 WASAPI and Core assemblies (MIT)
 assets/         app icon (.ico, .svg, .png)
-docs/           architecture notes + HELP.md
+docs/           architecture notes, HELP.md, RELEASING.md
 Build-StageJack.cmd, Launch-StageJack.cmd
 ```
 See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the signal chain and tuning constants, [docs/HELP.md](docs/HELP.md) for full control documentation, and [CHANGELOG.md](CHANGELOG.md) for versions.
