@@ -72,7 +72,7 @@ Full per-control documentation lives in **[docs/HELP.md](docs/HELP.md)**.
 | | Stage height | Tilts the top end (7.5 kHz) for a taller or lower image |
 | | Output level | Master volume, -12 to +6 dB |
 | Reverb / separation | Wet Level | Overall dry / wet amount |
-| | Space (preset) | Campus, Rhythm, Classroom, Dorm, Union, Innovation |
+| | Space (preset) | Campus, Rhythm, Classroom, Dorm, Union, Innovation ([values and how they were chosen](docs/PRESETS.md)) |
 | | Size | Tail length, about 0.3 s to 7 s |
 | | Tone | Dark to bright tail |
 | | Pre-delay | 0-60 ms before the tail starts |
@@ -113,7 +113,7 @@ assets/         app icon (.ico, .svg, .png)
 docs/           architecture notes, HELP.md, RELEASING.md
 Build-StageJack.cmd, Launch-StageJack.cmd
 ```
-See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the signal chain and tuning constants, [docs/HELP.md](docs/HELP.md) for full control documentation, and [CHANGELOG.md](CHANGELOG.md) for versions.
+See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the signal chain and tuning constants, [docs/HELP.md](docs/HELP.md) for full control documentation, [docs/PRESETS.md](docs/PRESETS.md) for the Space presets, and [CHANGELOG.md](CHANGELOG.md) for versions.
 
 ## Status
 Version 0.6.0. The packaged app, NAudio libraries, and font licenses are included in the Windows installer. Please report build errors, display problems or audio problems as issues.

@@ -1,5 +1,8 @@
 # Changelog
 
+## Unreleased
+- **Docs:** Added [docs/PRESETS.md](docs/PRESETS.md): the Space preset values and how they were derived. No code or version change.
+
 ## 0.6.0
 - Added a per-user Windows installer with Start Menu shortcut, optional desktop shortcut, launch-after-install, and uninstall support.
 - Added executable version metadata and a repeatable packaging script; the app and installer can both be Authenticode-signed from a certificate in the current user's store.
